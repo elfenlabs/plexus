@@ -18,8 +18,8 @@ add_library(CyclesCore
     src/context.cpp
     src/graph_builder.cpp
     src/execution_graph.cpp
-    # src/thread_pool.cpp # Milestone 2
-    # src/loop.cpp       # Milestone 3
+    src/thread_pool.cpp
+    src/run_loop.cpp
 )
 target_include_directories(CyclesCore PUBLIC include)
 
@@ -29,7 +29,8 @@ enable_testing()
 add_executable(CyclesTests
     tests/test_topology.cpp
     tests/test_cycle_detection.cpp
-    # tests/test_concurrency.cpp # Milestone 2
+    tests/test_concurrency.cpp
+    tests/test_run_loop.cpp
 )
 target_link_libraries(CyclesTests PRIVATE CyclesCore gtest_main)
 
