@@ -59,3 +59,30 @@ void example() {
     }
 }
 ```
+
+## Advanced Usage
+
+### Dependency Resolution (WAW, WAR)
+Cycles automatically handles complex dependency chains.
+
+- **Read-After-Write (RAW)**: A Reader will always run in a later wave than a Writer of the same resource.
+- **Write-After-Write (WAW)**: If multiple nodes write to the same resource, the order is determined by registration order (or priority). The second writer will run after the first.
+- **Write-After-Read (WAR)**: A Writer will run after all current Readers of a resource have finished.
+
+### Profiling
+You can hook into the `RunLoop` to measure performance.
+
+```cpp
+Cycles::RunLoop loop(pool);
+loop.set_profiler_callback([](const char* name, double duration_ms) {
+    std::cout << "[Profile] " << name << " took " << duration_ms << "ms\n"; 
+});
+```
+
+## Documentation
+To generate full API documentation:
+```bash
+cd build
+make docs
+```
+Open `docs/doxygen/html/index.html` in your browser.

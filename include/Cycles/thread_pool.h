@@ -9,21 +9,38 @@
 
 namespace Cycles {
 
+/**
+ * @brief A basic thread pool for executing tasks in parallel.
+ *
+ * Uses a fixed number of worker threads (std::thread::hardware_concurrency - 1)
+ * consuming from a shared blocking queue. Supports a bulk dispatch and a
+ * barrier wait mechanism.
+ */
 class ThreadPool {
 public:
   ThreadPool();
   ~ThreadPool();
 
-  // Prevent copying
   ThreadPool(const ThreadPool &) = delete;
   ThreadPool &operator=(const ThreadPool &) = delete;
 
   using Task = std::function<void()>;
 
-  // Dispatch a batch of tasks to the workers
+  /**
+   * @brief Dispatches a batch of tasks to the worker queue.
+   *
+   * This function is thread-safe.
+   *
+   * @param tasks A vector of void() functions to execute.
+   */
   void dispatch(const std::vector<Task> &tasks);
 
-  // Block until all currently dispatched tasks are complete
+  /**
+   * @brief Blocks the calling thread until all currently active (dispatched)
+   * tasks are complete.
+   *
+   * This acts as a barrier synchronization point.
+   */
   void wait();
 
 private:

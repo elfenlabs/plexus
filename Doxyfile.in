@@ -1,0 +1,23 @@
+PROJECT_NAME           = "Cycles"
+PROJECT_NUMBER         = 1.0.0
+PROJECT_BRIEF          = "Task Scheduling Framework for C++20"
+
+OUTPUT_DIRECTORY       = @CMAKE_CURRENT_BINARY_DIR@/docs/doxygen
+INPUT                  = @CMAKE_CURRENT_SOURCE_DIR@/include/Cycles @CMAKE_CURRENT_SOURCE_DIR@/README.md
+RECURSIVE              = YES
+USE_MDFILE_AS_MAINPAGE = @CMAKE_CURRENT_SOURCE_DIR@/README.md
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_XML           = NO
+
+# Classes and styling
+JAVADOC_AUTOBRIEF      = YES
+OPTIMIZE_OUTPUT_FOR_C  = NO
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+
+# Graphs (requires Graphviz/Dot)
+HAVE_DOT               = NO 
+# Set to YES if graphviz is installed
