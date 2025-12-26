@@ -20,12 +20,10 @@ namespace Plexus {
         if (n == 0)
             return {};
 
-        // 1. Sort nodes by priority (higher first), then by insertion order (stable sort)
-        std::stable_sort(
-            m_nodes.begin(), m_nodes.end(),
-            [](const NodeConfig &a, const NodeConfig &b) { return a.priority > b.priority; });
+        // REMOVED: Sorting m_nodes invalidates NodeID references (run_after, run_before).
+        // With dynamic priority scheduling, strict vector ordering is less critical.
 
-        // 2. Build Adjacency List based on dependencies
+        // 1. Build Adjacency List based on dependencies
         std::vector<std::vector<int>> adj(n);
         std::vector<int> indegree(n, 0);
 
@@ -88,7 +86,8 @@ namespace Plexus {
             }
         }
 
-        // 3. Cycle Detection (Simulated Topological Sort)
+        // 2. Cycle Detection & Topological Sort Record
+        std::vector<int> topo_order;
         {
             std::vector<int> temp_indegree = indegree;
             std::vector<int> queue;
@@ -101,6 +100,7 @@ namespace Plexus {
             while (!queue.empty()) {
                 auto u = queue.back();
                 queue.pop_back();
+                topo_order.push_back(u); // Record order
                 processed_count++;
 
                 for (auto v : adj[u]) {
@@ -115,15 +115,36 @@ namespace Plexus {
                 std::stringstream ss;
                 ss << "Cyclic dependency detected! Nodes involved or unreachable: ";
                 for (size_t i = 0; i < n; ++i) {
-                    if (indegree[i] > 0) { // Check original indegree or temp?
-                        // If checking original, some valid nodes might have > 0 but were processed.
-                        // But since we failed specific partial sort, debugging is hard.
-                        // Simple listing is enough.
+                    if (indegree[i] > 0) {
                         ss << m_nodes[i].debug_name << " ";
                     }
                 }
                 throw std::runtime_error(ss.str());
             }
+        }
+
+        // 3. Priority Calculation (Reverse Topological Pass)
+        // effective_priority = (user_priority * 100) + path_len + descendants
+        std::vector<int> path_len(n, 1);
+        std::vector<int> descendants(n, 0);
+        std::vector<int> effective_prio(n, 0);
+
+        // auto reverse_topo = topo_order;
+        // std::reverse(reverse_topo.begin(), reverse_topo.end());
+        // Or just iterate backwards
+        for (auto it = topo_order.rbegin(); it != topo_order.rend(); ++it) {
+            int u = *it;
+
+            for (auto v : adj[u]) {
+                path_len[u] = std::max(path_len[u], 1 + path_len[v]);
+                descendants[u] += (1 + descendants[v]);
+            }
+            // Logic:
+            // Base priority dominates (x100 factor arbitrarily chosen to overweight user intent)
+            // Then structural priority
+            // Note: Preventing overflow if graph is massive? int is 2B.
+            // 100 * user_prio + structure.
+            effective_prio[u] = (m_nodes[u].priority * 1000) + path_len[u] + descendants[u];
         }
 
         // 4. Construct Execution Graph
@@ -134,11 +155,16 @@ namespace Plexus {
             graph.nodes[i].work = m_nodes[i].work_function;
             graph.nodes[i].dependents = std::move(adj[i]);
             graph.nodes[i].initial_dependencies = indegree[i];
+            graph.nodes[i].priority = effective_prio[i];
 
             if (indegree[i] == 0) {
                 graph.entry_nodes.push_back(i);
             }
         }
+
+        // Sort entry nodes by priority so initial submission is ordered
+        std::sort(graph.entry_nodes.begin(), graph.entry_nodes.end(),
+                  [&](int a, int b) { return graph.nodes[a].priority > graph.nodes[b].priority; });
 
         return graph;
     }

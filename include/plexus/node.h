@@ -37,9 +37,9 @@ namespace Plexus {
         std::vector<NodeID> run_before; ///< Nodes that must run AFTER this node.
 
         /**
-         * @brief Priority for deterministic ordering of independent nodes.
-         * Higher priority nodes are processed earlier in the sort, potentially
-         * appearing earlier in the wave. Default is 0.
+         * @brief Base priority for the node.
+         * Default is 0. Higher values run earlier.
+         * This value is accumulated with descendant counts to form effective priority.
          */
         int priority = 0;
     };

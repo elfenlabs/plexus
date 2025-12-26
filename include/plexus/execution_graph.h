@@ -20,6 +20,7 @@ namespace Plexus {
             std::function<void()> work;   ///< The user task
             std::vector<int> dependents;  ///< Indices of nodes waiting on this one
             int initial_dependencies = 0; ///< How many inputs this node needs
+            int priority = 0;             ///< Effective priority for scheduling (higher is better)
         };
 
         std::vector<Node> nodes;      ///< All nodes in the graph

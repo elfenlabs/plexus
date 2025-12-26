@@ -22,9 +22,9 @@ namespace Plexus {
 
         // 2. Submit Entry Nodes
         for (int node_idx : graph.entry_nodes) {
-            m_pool.enqueue([this, &graph, counters_ptr, node_idx]() {
-                run_task(graph, counters_ptr, node_idx);
-            });
+            m_pool.enqueue([this, &graph, counters_ptr,
+                            node_idx]() { run_task(graph, counters_ptr, node_idx); },
+                           graph.nodes[node_idx].priority);
         }
 
         m_pool.wait();
@@ -51,7 +51,8 @@ namespace Plexus {
                 // Ensure visibility
                 std::atomic_thread_fence(std::memory_order_acquire);
                 m_pool.enqueue(
-                    [this, &graph, counters, dep_idx]() { run_task(graph, counters, dep_idx); });
+                    [this, &graph, counters, dep_idx]() { run_task(graph, counters, dep_idx); },
+                    graph.nodes[dep_idx].priority);
             }
         }
     }
