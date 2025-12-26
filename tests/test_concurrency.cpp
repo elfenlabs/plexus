@@ -1,6 +1,6 @@
 #include "plexus/context.h"
 #include "plexus/graph_builder.h"
-#include "plexus/thread_pool.h"
+#include "thread_pool.h"
 #include <atomic>
 #include <gtest/gtest.h>
 #include <random>

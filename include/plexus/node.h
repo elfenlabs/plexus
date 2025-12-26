@@ -35,6 +35,14 @@ namespace Plexus {
     };
 
     /**
+     * @brief Specifies which thread a node should execute on.
+     */
+    enum class ThreadAffinity {
+        Any = -1, ///< Can run on any worker thread.
+        Main = 0  ///< Must run on the thread that called Executor::run().
+    };
+
+    /**
      * @brief Configuration structure for creating a Node in the Graph.
      */
     struct NodeConfig {
@@ -48,7 +56,6 @@ namespace Plexus {
         /**
          * @brief Base priority for the node.
          * Default is 0. Higher values run earlier.
-         * This value is accumulated with descendant counts to form effective priority.
          */
         int priority = 0;
 
@@ -56,5 +63,10 @@ namespace Plexus {
          * @brief Policy to apply on failure. Default is Continue.
          */
         ErrorPolicy error_policy = ErrorPolicy::Continue;
+
+        /**
+         * @brief Specific thread requirement. Default is Any.
+         */
+        ThreadAffinity thread_affinity = ThreadAffinity::Any;
     };
 }

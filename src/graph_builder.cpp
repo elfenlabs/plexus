@@ -157,6 +157,7 @@ namespace Plexus {
             graph.nodes[i].initial_dependencies = indegree[i];
             graph.nodes[i].priority = effective_prio[i];
             graph.nodes[i].error_policy = m_nodes[i].error_policy;
+            graph.nodes[i].thread_affinity = m_nodes[i].thread_affinity;
             graph.nodes[i].label = m_nodes[i].debug_name;
 
             if (indegree[i] == 0) {

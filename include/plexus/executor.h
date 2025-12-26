@@ -1,9 +1,14 @@
 #pragma once
 #include "plexus/execution_graph.h"
-#include "plexus/thread_pool.h"
 #include <atomic>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <vector>
 
 namespace Plexus {
+
+    class ThreadPool;
 
     /**
      * @brief A generic executor for processing ExecutionGraphs.
@@ -13,6 +18,16 @@ namespace Plexus {
      */
     class Executor {
     public:
+        /**
+         * @brief Constructs an Executor with a default internal ThreadPool.
+         * The internal pool uses (hardware_concurrency - 1) threads.
+         */
+        Executor();
+
+        /**
+         * @brief Constructs an Executor using an externally managed ThreadPool.
+         * @param pool The thread pool to use for task execution.
+         */
         explicit Executor(ThreadPool &pool);
 
         /**
@@ -39,7 +54,8 @@ namespace Plexus {
     private:
         void run_task(const ExecutionGraph &graph, std::atomic<int> *counters, int node_idx);
 
-        ThreadPool &m_pool;
+        std::unique_ptr<ThreadPool> m_owned_pool;
+        ThreadPool *m_pool;
         ProfilerCallback m_profiler_callback;
 
         // Error Handling
@@ -50,6 +66,14 @@ namespace Plexus {
         // Zero-Allocation Cache
         std::unique_ptr<std::atomic<int>[]> m_counter_cache;
         size_t m_counter_cache_size = 0;
-    };
 
+        // Thread Affinity Support
+        void process_main_thread_tasks();
+        std::vector<int> m_main_thread_queue;
+        std::mutex m_main_queue_mutex;
+        std::vector<int> m_main_queue_backlog; // Incoming tasks for main thread
+
+        std::atomic<int> m_active_task_count{0};
+        std::condition_variable m_cv_main_thread; // To wake up main thread
+    };
 }

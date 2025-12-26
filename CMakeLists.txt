@@ -26,7 +26,6 @@ add_library(plexusCore
     src/context.cpp
     src/graph_builder.cpp
     src/execution_graph.cpp
-    src/thread_pool.cpp
     src/executor.cpp
 )
 target_include_directories(plexusCore PUBLIC include)
@@ -42,8 +41,10 @@ add_executable(plexusTests
     tests/test_explicit_ordering.cpp
     tests/test_error_handling.cpp
     tests/test_graph_viz.cpp
+    tests/test_affinity.cpp
 )
 target_link_libraries(plexusTests PRIVATE plexusCore gtest_main)
+target_include_directories(plexusTests PRIVATE src)
 
 # Documentation
 find_package(Doxygen)
@@ -65,3 +66,4 @@ add_executable(plexusBenchmarks
     benchmarks/benchmark_thread_pool.cpp
 )
 target_link_libraries(plexusBenchmarks PRIVATE plexusCore benchmark::benchmark_main)
+target_include_directories(plexusBenchmarks PRIVATE src)

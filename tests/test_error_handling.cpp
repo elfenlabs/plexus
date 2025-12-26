@@ -1,5 +1,6 @@
 #include "plexus/executor.h"
 #include "plexus/graph_builder.h"
+#include "thread_pool.h"
 #include <atomic>
 #include <chrono>
 #include <gtest/gtest.h>

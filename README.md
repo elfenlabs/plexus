@@ -25,6 +25,25 @@ make
 ctest
 ```
 
+## Benchmarking
+
+plexus uses **Google Benchmark** to measure performance. 
+
+### 1. Build Benchmarks
+Always build in **Release** mode for accurate timings:
+
+```bash
+cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make plexusBenchmarks
+```
+
+### 2. Run Benchmarks
+
+```bash
+./plexusBenchmarks
+```
+
 ## Basic Usage
 
 ```cpp
@@ -59,10 +78,21 @@ void example() {
     auto graph = builder.bake();
 
     // Execute the graph
-    Plexus::ThreadPool pool;
-    Plexus::Executor executor(pool);
+    // (An internal ThreadPool is created and managed automatically)
+    Plexus::Executor executor;
     executor.run(graph);
 }
+```
+
+### Advanced: Manual Thread Pool Management
+If you want to share a single thread pool across multiple executors or configure threads manually:
+
+```cpp
+#include "plexus/detail/thread_pool.h"
+
+Plexus::ThreadPool pool; // 8 worker threads by default
+Plexus::Executor executor(pool);
+executor.run(graph);
 ```
 
 ## Advanced Usage

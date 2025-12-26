@@ -24,8 +24,9 @@ namespace Plexus {
             std::vector<int> dependents;  ///< Indices of nodes waiting on this one
             int initial_dependencies = 0; ///< How many inputs this node needs
             int priority = 0;             ///< Effective priority for scheduling (higher is better)
-            ErrorPolicy error_policy = ErrorPolicy::Continue; ///< Policy on failure
-            std::string label;                                ///< Debug label
+            ErrorPolicy error_policy = ErrorPolicy::Continue;     ///< Policy on failure
+            ThreadAffinity thread_affinity = ThreadAffinity::Any; ///< Thread constraint
+            std::string label;                                    ///< Debug label
         };
 
         std::vector<Node> nodes;      ///< All nodes in the graph
