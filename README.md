@@ -1,6 +1,6 @@
 # plexus
 
-plexus is a high-performance, multithreaded task scheduling framework for C++20 based on Directed Acyclic Graphs (DAG). It orchestrates units of work (Nodes) based on data access rules (Dependencies) to dynamically execute tasks as soon as their prerequisites are met.
+**plexus** is a high-performance, multithreaded task scheduling framework for C++20 based on Directed Acyclic Graphs (DAG). It orchestrates units of work (Nodes) based on data access rules (Dependencies) to dynamically execute tasks as soon as their prerequisites are met.
 
 ## Features
 
@@ -31,29 +31,31 @@ ctest
 #include <iostream>
 
 void example() {
+    // Register a resource
     Plexus::Context ctx;
     auto buffer_id = ctx.register_resource("BufferA");
 
+    // Create a graph builder
     Plexus::GraphBuilder builder(ctx);
 
-    // Node A: Writes to BufferA
+    // Create a node that writes to BufferA
     builder.add_node({
         "Writer",
         []() { std::cout << "Writing...\n"; },
         {{buffer_id, Plexus::Access::WRITE}}
     });
 
-    // Node B: Reads from BufferA
+    // Create a node that reads from BufferA
     builder.add_node({
         "Reader",
         []() { std::cout << "Reading...\n"; },
         {{buffer_id, Plexus::Access::READ}}
     });
 
-    // Bake into an execution graph
+    // Bake the graph
     auto graph = builder.bake();
 
-    // Execute
+    // Execute the graph
     Plexus::ThreadPool pool;
     Plexus::Executor executor(pool);
     executor.run(graph);
