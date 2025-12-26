@@ -72,6 +72,49 @@ plexus automatically handles complex dependency chains.
 - **Write-After-Write (WAW)**: If multiple nodes write to the same resource, the order is determined by registration order (or priority). The second writer will run after the first.
 - **Write-After-Read (WAR)**: A Writer will run after all current Readers of a resource have finished.
 
+### Node Configuration
+The `NodeConfig` struct gives you fine-grained control over task execution.
+
+#### 1. Dependencies
+The most common way to order nodes. You declare which Resources a node needs to READ or WRITE. The `GraphBuilder` infers the dependency arrows automatically.
+
+```cpp
+builder.add_node({
+    .debug_name = "MyNode",
+    .work_function = [](){},
+    .dependencies = {{resource_id, Plexus::Access::READ}}
+});
+```
+
+#### 2. Explicit Ordering (`run_after`, `run_before`)
+For cases where data dependencies aren't enough (or don't exist), you can force edges between nodes.
+
+```cpp
+auto node_a = builder.add_node({...});
+// Force Node B to run after Node A
+builder.add_node({
+    .debug_name = "Node B",
+    .run_after = {node_a}
+});
+```
+
+#### 3. Task Priority (`priority`)
+You can assign an integer priority to any node (Default: 0).
+**Important**: This controls **Execution Urgency**, not Baking Order. 
+- Higher priority tasks are executed earlier by the thread pool when multiple tasks are ready to run simultaneously.
+- It does **not** override dependencies. A high-priority task must still wait for its dependencies to finish.
+- The `GraphBuilder` calculates an *effective priority* for each node:
+  `Effective Priority = (User Priority * 1000) + Critical Path Length + Descendants`
+  
+  This ensures that "Bottleneck" nodes (roots of deep dependency trees) get a natural boost, but you can always just set a high user priority (e.g. 100) to force a node to the front of the line.
+
+```cpp
+builder.add_node({
+    .debug_name = "CriticalTask",
+    .priority = 100 // Runs ASAP
+});
+```
+
 ### Profiling
 You can hook into the `Executor` to measure performance.
 
