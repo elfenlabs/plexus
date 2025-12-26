@@ -20,10 +20,7 @@ namespace Cycles {
         if (n == 0)
             return {};
 
-        // 1. Sort nodes by priority (higher first), then by insertion order (stable
-        // sort) Actually, m_nodes is already in insertion order. If we want to
-        // support priority, we should stable_sort. For now, let's assume registration
-        // order is enough or simple priority sort.
+        // 1. Sort nodes by priority (higher first), then by insertion order (stable sort)
         std::stable_sort(
             m_nodes.begin(), m_nodes.end(),
             [](const NodeConfig &a, const NodeConfig &b) { return a.priority > b.priority; });
@@ -33,15 +30,8 @@ namespace Cycles {
         std::vector<int> indegree(n, 0);
 
         // Resources tracking
-        // We don't know the max ResourceID ahead of time easily without querying
-        // Context or dynamic sizing. We'll use a map for sparse tracking or resize if
-        // we knew max ID. Given Context::m_next_id, we could ask Context, but for now
-        // map is safer.
         std::map<ResourceID, int> last_writer;
         std::map<ResourceID, std::vector<int>> current_readers;
-
-        // Initialize tracking
-        // Pre-scan for max id could optimize, but map is fine.
 
         for (size_t i = 0; i < n; ++i) {
             const auto &node = m_nodes[i];
@@ -53,9 +43,6 @@ namespace Cycles {
                     // Dependency: Last Writer -> This Reader
                     if (last_writer.count(res)) {
                         auto writer_idx = last_writer[res];
-                        // Avoid duplicate edges? Not strictly necessary for Kahn's but good.
-                        // Checking existence in vector is O(E), let's just add and assume ok
-                        // or use set if needed. For simplicity, just add.
                         adj[writer_idx].push_back(i);
                         indegree[i]++;
                     }
@@ -101,50 +88,56 @@ namespace Cycles {
             }
         }
 
-        // 3. Topological Sort (Kahn's Algorithm) with Layering
-        std::vector<int> queue;
-        for (size_t i = 0; i < n; ++i) {
-            if (indegree[i] == 0) {
-                queue.push_back(i);
+        // 3. Cycle Detection (Simulated Topological Sort)
+        {
+            std::vector<int> temp_indegree = indegree;
+            std::vector<int> queue;
+            for (size_t i = 0; i < n; ++i) {
+                if (temp_indegree[i] == 0)
+                    queue.push_back(i);
             }
-        }
 
-        ExecutionGraph graph;
-        size_t processed_count = 0;
-
-        while (!queue.empty()) {
-            auto wave = ExecutionGraph::Wave{};
-            std::vector<int> next_queue;
-
-            for (auto u : queue) {
-                // Add actual task to wave
-                wave.tasks.push_back(m_nodes[u].work_function);
+            size_t processed_count = 0;
+            while (!queue.empty()) {
+                auto u = queue.back();
+                queue.pop_back();
                 processed_count++;
 
                 for (auto v : adj[u]) {
-                    indegree[v]--;
-                    if (indegree[v] == 0) {
-                        next_queue.push_back(v);
+                    temp_indegree[v]--;
+                    if (temp_indegree[v] == 0) {
+                        queue.push_back(v);
                     }
                 }
             }
 
-            graph.waves.push_back(std::move(wave));
-            queue = std::move(next_queue);
+            if (processed_count != n) {
+                std::stringstream ss;
+                ss << "Cyclic dependency detected! Nodes involved or unreachable: ";
+                for (size_t i = 0; i < n; ++i) {
+                    if (indegree[i] > 0) { // Check original indegree or temp?
+                        // If checking original, some valid nodes might have > 0 but were processed.
+                        // But since we failed specific partial sort, debugging is hard.
+                        // Simple listing is enough.
+                        ss << m_nodes[i].debug_name << " ";
+                    }
+                }
+                throw std::runtime_error(ss.str());
+            }
         }
 
-        // 4. Cycle Detection
-        if (processed_count != n) {
-            // Construct error message with remaining nodes
-            // (Optional: Find the cycle for debug, simpler to just list nodes)
-            std::stringstream ss;
-            ss << "Cyclic dependency detected! Nodes involved or unreachable: ";
-            for (size_t i = 0; i < n; ++i) {
-                if (indegree[i] > 0) {
-                    ss << m_nodes[i].debug_name << " ";
-                }
+        // 4. Construct Execution Graph
+        ExecutionGraph graph;
+        graph.nodes.resize(n);
+
+        for (size_t i = 0; i < n; ++i) {
+            graph.nodes[i].work = m_nodes[i].work_function;
+            graph.nodes[i].dependents = std::move(adj[i]);
+            graph.nodes[i].initial_dependencies = indegree[i];
+
+            if (indegree[i] == 0) {
+                graph.entry_nodes.push_back(i);
             }
-            throw std::runtime_error(ss.str());
         }
 
         return graph;

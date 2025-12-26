@@ -21,17 +21,19 @@ TEST(TopologyTest, ReadAfterWrite) {
 
     auto graph = builder.bake();
 
-    ASSERT_EQ(graph.waves.size(), 2);
-    // Execute Wave 0
-    ASSERT_EQ(graph.waves[0].tasks.size(), 1);
-    graph.waves[0].tasks[0]();
-    EXPECT_TRUE(a_ran);
-    EXPECT_FALSE(b_ran);
+    // Check we have nodes
+    ASSERT_FALSE(graph.nodes.empty());
 
-    // Execute Wave 1
-    ASSERT_EQ(graph.waves[1].tasks.size(), 1);
-    graph.waves[1].tasks[0]();
-    EXPECT_TRUE(b_ran);
+    // Expectation: A -> B
+    // A is Node 0, B is Node 1
+
+    // Verify A -> B edge
+    bool a_to_b = false;
+    for (int dep : graph.nodes[0].dependents)
+        if (dep == 1)
+            a_to_b = true;
+    EXPECT_TRUE(a_to_b);
+    EXPECT_GE(graph.nodes[1].initial_dependencies, 1);
 }
 
 TEST(TopologyTest, WriteAfterRead) {
@@ -50,6 +52,13 @@ TEST(TopologyTest, WriteAfterRead) {
 
     auto graph = builder.bake();
 
-    ASSERT_EQ(graph.waves.size(), 2);
-    // Since names are lost in execution graph, we infer by wave count and logic
+    // Expectation: A -> B (WAR)
+    // A is Node 0, B is Node 1
+
+    bool a_to_b = false;
+    for (int dep : graph.nodes[0].dependents)
+        if (dep == 1)
+            a_to_b = true;
+    EXPECT_TRUE(a_to_b);
+    EXPECT_GE(graph.nodes[1].initial_dependencies, 1);
 }

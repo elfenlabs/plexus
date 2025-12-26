@@ -10,13 +10,19 @@ namespace Cycles {
      * are guaranteed to be independent of each other (conforming to dependencies)
      * and can safely run in parallel.
      */
+    /**
+     * @brief A baked dependency graph for asynchronous execution.
+     *
+     * Nodes are executed as soon as their dependencies are met.
+     */
     struct ExecutionGraph {
-        /**
-         * @brief A group of parallelizable tasks.
-         */
-        struct Wave {
-            std::vector<std::function<void()>> tasks; ///< The list of work functions.
+        struct Node {
+            std::function<void()> work;   ///< The user task
+            std::vector<int> dependents;  ///< Indices of nodes waiting on this one
+            int initial_dependencies = 0; ///< How many inputs this node needs
         };
-        std::vector<Wave> waves; ///< The ordered sequence of waves to execute.
+
+        std::vector<Node> nodes;      ///< All nodes in the graph
+        std::vector<int> entry_nodes; ///< Nodes with 0 dependencies (start here)
     };
 }

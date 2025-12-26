@@ -18,19 +18,23 @@ TEST(TopologyTest, ExplicitOrdering) {
     msgB.debug_name = "NodeB";
     msgB.work_function = []() {};
     msgB.run_after.push_back(idA);
-    builder.add_node(msgB);
+    auto idB = builder.add_node(msgB);
 
     auto graph = builder.bake();
 
     // Check we have waves
-    ASSERT_FALSE(graph.waves.empty());
+    // Check we have nodes
+    ASSERT_FALSE(graph.nodes.empty());
 
-    // Since B depends on A, A must run in an earlier wave.
-    // They cannot share a wave, so we expect at least 2 waves.
-
-    ASSERT_GE(graph.waves.size(), 2);
-    ASSERT_EQ(graph.waves[0].tasks.size(), 1);
-    ASSERT_EQ(graph.waves[1].tasks.size(), 1);
+    // Since B depends on A, A must have B in dependents.
+    // keys: A -> B
+    bool found_edge = false;
+    for (int dep : graph.nodes[idA].dependents) {
+        if (dep == idB)
+            found_edge = true;
+    }
+    EXPECT_TRUE(found_edge) << "Node A should have edge to Node B";
+    EXPECT_GT(graph.nodes[idB].initial_dependencies, 0);
 }
 
 TEST(TopologyTest, ExplicitOrderingRunBefore) {
@@ -55,9 +59,22 @@ TEST(TopologyTest, ExplicitOrderingRunBefore) {
 
     auto graph = builder.bake();
 
-    // With A -> B dependency, A must be in an earlier wave than B.
-    // Since they are otherwise independent, we expect at least 2 waves.
-    ASSERT_GE(graph.waves.size(), 2);
+    // With A -> B dependency, A must point to B.
+    bool found_edge = false;
+    // Note: ID of A (Prereq) is unknown until we added it. But it was added second.
+    // IDs: Dependent=0, Prereq=1.
+    // Prereq (1) -> Dependent (0).
+    // run_before on Prereq means: Prereq -> Dependent.
+    // So node 1 should have node 0 in dependents.
+
+    // We can assume IDs 0 and 1 because we added them in order and default priority.
+    int idPrereq = 1;
+
+    for (int dep : graph.nodes[idPrereq].dependents) {
+        if (dep == idDependent)
+            found_edge = true;
+    }
+    EXPECT_TRUE(found_edge);
 }
 
 TEST(TopologyTest, ExplicitCycle) {

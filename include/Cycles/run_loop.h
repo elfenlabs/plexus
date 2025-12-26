@@ -62,6 +62,7 @@ namespace Cycles {
 
     private:
         void execute_graph(const ExecutionGraph &graph, const char *debug_label);
+        void run_task(const ExecutionGraph &graph, std::atomic<int> *counters, int node_idx);
 
         ThreadPool &m_pool;
         ExecutionGraph m_fixed_graph;

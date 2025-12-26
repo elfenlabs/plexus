@@ -36,6 +36,15 @@ namespace Cycles {
         void dispatch(const std::vector<Task> &tasks);
 
         /**
+         * @brief Enqueues a single task.
+         *
+         * Thread-safe and efficient for runtime dynamic scheduling.
+         *
+         * @param task The void() function to execute.
+         */
+        void enqueue(Task task);
+
+        /**
          * @brief Blocks the calling thread until all currently active (dispatched)
          * tasks are complete.
          *

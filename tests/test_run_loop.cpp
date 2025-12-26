@@ -14,12 +14,14 @@ TEST(RunLoopTest, Accumulator) {
 
     // Setup Fixed Graph (Simple task counting executions)
     Cycles::ExecutionGraph fixed_graph;
-    fixed_graph.waves.push_back({{[&]() { fixed_count++; }}});
+    fixed_graph.nodes.push_back({[&]() { fixed_count++; }, {}, 0});
+    fixed_graph.entry_nodes.push_back(0);
     loop.set_fixed_graph(std::move(fixed_graph));
 
     // Setup Render Graph
     Cycles::ExecutionGraph render_graph;
-    render_graph.waves.push_back({{[&]() { render_count++; }}});
+    render_graph.nodes.push_back({[&]() { render_count++; }, {}, 0});
+    render_graph.entry_nodes.push_back(0);
     loop.set_render_graph(std::move(render_graph));
 
     // 1. Small delta (less than step) -> 0 Fixed, 1 Render
@@ -56,7 +58,8 @@ TEST(RunLoopTest, Profiling) {
     });
 
     Cycles::ExecutionGraph graph;
-    graph.waves.push_back({{[]() {}}});
+    graph.nodes.push_back({[]() {}, {}, 0});
+    graph.entry_nodes.push_back(0);
     loop.set_render_graph(std::move(graph));
 
     loop.run_one_frame(0.016);

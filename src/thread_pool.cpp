@@ -39,6 +39,15 @@ namespace Cycles {
         m_cv_work.notify_all();
     }
 
+    void ThreadPool::enqueue(Task task) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_active_tasks++;
+            m_queue.push(std::move(task));
+        }
+        m_cv_work.notify_one();
+    }
+
     void ThreadPool::wait() {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_cv_done.wait(lock, [this]() { return m_active_tasks == 0; });
