@@ -20,13 +20,18 @@ namespace Plexus {
         }
 
         // 1. Initialize State
-        // Use unique_ptr array for counters because std::atomic is not copyable/movable
-        std::unique_ptr<std::atomic<int>[]> counters(new std::atomic<int>[graph.nodes.size()]);
-        for (size_t i = 0; i < graph.nodes.size(); ++i) {
-            counters[i].store(graph.nodes[i].initial_dependencies, std::memory_order_relaxed);
+        // Zero-Allocation: Reuse atomic counters if capacity allows
+        if (m_counter_cache_size < graph.nodes.size()) {
+            m_counter_cache.reset(new std::atomic<int>[graph.nodes.size()]);
+            m_counter_cache_size = graph.nodes.size();
         }
 
-        std::atomic<int> *counters_ptr = counters.get();
+        std::atomic<int> *counters_ptr = m_counter_cache.get();
+
+        for (size_t i = 0; i < graph.nodes.size(); ++i) {
+            // Relaxed store is fine because we haven't published this memory to threads yet
+            counters_ptr[i].store(graph.nodes[i].initial_dependencies, std::memory_order_relaxed);
+        }
 
         // 2. Submit Entry Nodes
         for (int node_idx : graph.entry_nodes) {

@@ -46,6 +46,10 @@ namespace Plexus {
         std::atomic<bool> m_cancel_graph_execution{false};
         std::mutex m_exception_mutex;
         std::vector<std::exception_ptr> m_exceptions;
+
+        // Zero-Allocation Cache
+        std::unique_ptr<std::atomic<int>[]> m_counter_cache;
+        size_t m_counter_cache_size = 0;
     };
 
 }
