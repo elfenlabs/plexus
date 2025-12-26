@@ -53,17 +53,24 @@ namespace Plexus {
         void wait();
 
     private:
-        void worker_thread();
+        struct Worker {
+            std::deque<Task> tasks;
+            std::mutex mutex;
+        };
 
-        std::vector<std::thread> m_workers;
-        std::queue<Task> m_queue;
+        void worker_thread(int index);
+        void push_random(Task task);
 
-        std::mutex m_mutex;
-        std::condition_variable m_cv_work; // Notify workers of new tasks
-        std::condition_variable m_cv_done; // Notify main thread when tasks complete
+        // One worker data per thread
+        std::vector<std::unique_ptr<Worker>> m_workers_data;
+        std::vector<std::thread> m_threads;
+
+        std::mutex m_cv_mutex;             // Protects condition variables and global stop state
+        std::condition_variable m_cv_work; // Global signal for new work
+        std::condition_variable m_cv_done; // Notify main thread when all tasks completed
 
         std::atomic<bool> m_stop = false;
-        std::atomic<int> m_active_tasks = 0; // Tasks currently in queue or running
+        std::atomic<int> m_active_tasks = 0;
     };
 
 }
