@@ -82,7 +82,6 @@ TEST(ExecutorTest, Prioritization) {
     std::atomic<int> ticket{0};
 
     // We will store the execution ticket for each task type
-    // Since verify vector push is not thread safe, we use pre-allocated arrays
     const int N = 100;
     std::vector<int> high_tickets(N, 0);
     std::vector<int> low_tickets(N, 0);
@@ -94,7 +93,6 @@ TEST(ExecutorTest, Prioritization) {
         cfg.priority = 10; // User High
         cfg.work_function = [i, &high_tickets, &ticket]() {
             high_tickets[i] = ticket.fetch_add(1);
-            // Simulate tiny work to allow stealing/scheduling drift
             std::this_thread::yield();
         };
         builder.add_node(cfg);
@@ -115,20 +113,59 @@ TEST(ExecutorTest, Prioritization) {
     auto graph = builder.bake();
     executor.run(graph);
 
-    // Calculate averages
     double high_avg = std::accumulate(high_tickets.begin(), high_tickets.end(), 0.0) / N;
     double low_avg = std::accumulate(low_tickets.begin(), low_tickets.end(), 0.0) / N;
 
-    // High priority tasks should run earlier, so their tickets should be smaller.
-    // Given 200 tasks:
-    // Ideally High = 0..99 (Avg 49.5)
-    // Low = 100..199 (Avg 149.5)
-    // We expect High Avg < Low Avg significantly.
-
     EXPECT_LT(high_avg, low_avg);
+    EXPECT_LT(high_avg, 100.0);
+    EXPECT_GT(low_avg, 100.0);
+}
 
-    // Check also that at least some High tasks ran before Low tasks (Overlap check)
-    // Actually, just ensuring the means are separated by a margin is safer for flakes.
-    EXPECT_LT(high_avg, 100.0); // Should be in the first half mostly
-    EXPECT_GT(low_avg, 100.0);  // Should be in the second half mostly
+TEST(ExecutorTest, DescendantBiased) {
+    Plexus::Context ctx;
+    Plexus::GraphBuilder builder(ctx);
+    Plexus::ThreadPool pool;
+    Plexus::Executor executor(pool);
+
+    std::atomic<int> ticket{0};
+
+    // We create many independent trees.
+    // Half are "Heavy" (Root + 20 children)
+    // Half are "Light" (Root + 0 children)
+    // We verify "Heavy Roots" run before "Light Roots" on average.
+
+    const int NUM_TREES = 50;
+    std::vector<int> heavy_root_tickets(NUM_TREES, 0);
+    std::vector<int> light_root_tickets(NUM_TREES, 0);
+
+    for (int i = 0; i < NUM_TREES; ++i) {
+        // Heavy Tree
+        auto heavy_root = builder.add_node(
+            {"HeavyRoot_" + std::to_string(i), [i, &heavy_root_tickets, &ticket]() {
+                 heavy_root_tickets[i] = ticket.fetch_add(1);
+                 std::this_thread::yield();
+             }});
+
+        // 20 Children for Heavy Root (increases its descendant count)
+        for (int c = 0; c < 20; ++c) {
+            builder.add_node({"Child", []() {}, {}, {heavy_root}});
+        }
+
+        // Light Tree (Just a root)
+        builder.add_node({"LightRoot_" + std::to_string(i), [i, &light_root_tickets, &ticket]() {
+                              light_root_tickets[i] = ticket.fetch_add(1);
+                              std::this_thread::yield();
+                          }});
+    }
+
+    auto graph = builder.bake();
+    executor.run(graph);
+
+    double heavy_avg =
+        std::accumulate(heavy_root_tickets.begin(), heavy_root_tickets.end(), 0.0) / NUM_TREES;
+    double light_avg =
+        std::accumulate(light_root_tickets.begin(), light_root_tickets.end(), 0.0) / NUM_TREES;
+
+    // Heavy roots should have higher calculated priority -> Lower ticket number
+    EXPECT_LT(heavy_avg, light_avg);
 }
