@@ -10,11 +10,12 @@
 namespace Plexus {
 
     /**
-     * @brief A basic thread pool for executing tasks in parallel.
+     * @brief A high-performance thread pool using a work-stealing scheduler.
      *
-     * Uses a fixed number of worker threads (std::thread::hardware_concurrency - 1)
-     * consuming from a shared blocking queue. Supports a bulk dispatch and a
-     * barrier wait mechanism.
+     * Uses a fixed number of worker threads (std::thread::hardware_concurrency - 1).
+     * Each thread maintains its own local task queue to minimize contention.
+     * When a thread is idle, it attempts to "steal" work from other threads' queues.
+     * Supports a bulk dispatch and a barrier wait mechanism.
      */
     class ThreadPool {
     public:

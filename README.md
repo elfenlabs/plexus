@@ -4,6 +4,7 @@
 
 ## Features
 
+- **Work-Stealing Scheduler**: High-performance thread pool using per-thread distributed queues to minimize contention and maximize cache locality.
 - **Dynamic Task Graph**: Nodes execute immediately upon dependency resolution, maximizing parallelism.
 - **Strict Phase Separation**: Heavy validation and optimization during "Baking", allocation-free execution during "Runtime".
 - **Data-Driven Dependencies**: Automatic topology inference based on Read/Write access to Resources.
