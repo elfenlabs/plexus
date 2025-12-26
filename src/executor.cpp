@@ -19,6 +19,10 @@ namespace Plexus {
             m_exceptions.clear();
         }
 
+        // 0. Pre-allocate Thread Pool Ring Buffers
+        // We ensure enough capacity for all nodes to be enqueued without blocking/allocating.
+        m_pool.reserve_task_capacity(graph.nodes.size());
+
         // 1. Initialize State
         // Zero-Allocation: Reuse atomic counters if capacity allows
         if (m_counter_cache_size < graph.nodes.size()) {

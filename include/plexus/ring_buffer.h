@@ -1,0 +1,71 @@
+#pragma once
+#include <memory>
+#include <vector>
+
+namespace Plexus {
+
+    /**
+     * @brief A fixed-size circular buffer.
+     * Not thread-safe. Must be protected by external synchronization.
+     */
+    template <typename T> class RingBuffer {
+    public:
+        RingBuffer() = default;
+
+        /**
+         * @brief Resizes the buffer to the specified capacity.
+         * WARNING: This invalidates existing contents. safely use only when empty.
+         */
+        void resize(size_t new_capacity) {
+            if (new_capacity <= m_capacity)
+                return;
+
+            m_buffer = std::make_unique<T[]>(new_capacity);
+            m_capacity = new_capacity;
+            m_head = 0;
+            m_tail = 0;
+            m_count = 0;
+        }
+
+        /**
+         * @brief Pushes an item into the buffer.
+         * @return true if successful, false if full.
+         */
+        bool push(T item) {
+            if (m_count == m_capacity)
+                return false;
+
+            m_buffer[m_tail] = std::move(item);
+            m_tail = (m_tail + 1) % m_capacity;
+            m_count++;
+            return true;
+        }
+
+        /**
+         * @brief Pops an item from the buffer.
+         * @return true if successful, false if empty.
+         */
+        bool pop(T &out_item) {
+            if (m_count == 0)
+                return false;
+
+            out_item = std::move(m_buffer[m_head]);
+            m_head = (m_head + 1) % m_capacity;
+            m_count--;
+            return true;
+        }
+
+        [[nodiscard]] bool empty() const { return m_count == 0; }
+        [[nodiscard]] bool full() const { return m_count == m_capacity; }
+        [[nodiscard]] size_t size() const { return m_count; }
+        [[nodiscard]] size_t capacity() const { return m_capacity; }
+
+    private:
+        std::unique_ptr<T[]> m_buffer;
+        size_t m_capacity = 0;
+        size_t m_head = 0;
+        size_t m_tail = 0;
+        size_t m_count = 0;
+    };
+
+} // namespace Plexus

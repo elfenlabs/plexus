@@ -1,4 +1,4 @@
-#pragma once
+#include "plexus/ring_buffer.h" // Added include
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -35,10 +35,6 @@ namespace Plexus {
          *
          * @param tasks A vector of void() functions to execute.
          */
-        /**
-         * @brief Dispatches a batch of tasks to the worker queue.
-         * Default priority (4) is used for all tasks.
-         */
         void dispatch(const std::vector<Task> &tasks);
 
         /**
@@ -49,16 +45,30 @@ namespace Plexus {
          */
         void enqueue(Task task, int priority = 4);
 
-        // ... (wait method unchanged)
-
+        /**
+         * @brief Waits for all tasks to complete.
+         *
+         * This function blocks the calling thread until all tasks in the pool have completed.
+         */
         void wait();
+
+        /**
+         * @brief Reserves capacity in the worker queues to accommodate at least total_tasks.
+         *
+         * This prevents memory allocation during enqueue operations.
+         * Should be called when the pool is idle.
+         */
+        void reserve_task_capacity(size_t total_tasks);
 
     private:
         static constexpr int PRIORITY_LEVELS = 8;
 
+        // Safety multiplier to avoid random assignment filling one queue prematurely
+        static constexpr size_t RING_BUFFER_GROWTH_FACTOR = 2;
+
         struct Worker {
             // [0] = Lowest Priority, [7] = Highest Priority
-            std::array<std::deque<Task>, PRIORITY_LEVELS> tasks;
+            std::array<RingBuffer<Task>, PRIORITY_LEVELS> tasks;
             std::mutex mutex;
         };
 

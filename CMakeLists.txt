@@ -13,6 +13,14 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+FetchContent_Declare(
+  googlebenchmark
+  URL https://github.com/google/benchmark/archive/refs/tags/v1.8.3.zip
+)
+set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googlebenchmark)
+
 # Core Library
 add_library(plexusCore
     src/context.cpp
@@ -51,3 +59,9 @@ endif()
 
 include(GoogleTest)
 gtest_discover_tests(plexusTests)
+
+# Benchmarks
+add_executable(plexusBenchmarks
+    benchmarks/benchmark_thread_pool.cpp
+)
+target_link_libraries(plexusBenchmarks PRIVATE plexusCore benchmark::benchmark_main)

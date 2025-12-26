@@ -20,6 +20,9 @@ namespace Plexus {
         for (unsigned int i = 0; i < count; ++i) {
             m_threads.emplace_back(&ThreadPool::worker_thread, this, i);
         }
+
+        // Initialize with default capacity to prevent infinite spin on enqueue
+        reserve_task_capacity(1024);
     }
 
     ThreadPool::~ThreadPool() {
@@ -32,28 +35,52 @@ namespace Plexus {
         }
     }
 
+    void ThreadPool::reserve_task_capacity(size_t total_tasks) {
+        if (m_workers_data.empty())
+            return;
+
+        size_t per_worker = (total_tasks / m_workers_data.size()) * RING_BUFFER_GROWTH_FACTOR;
+        if (per_worker < 128)
+            per_worker = 128; // Minimum sanity
+
+        for (auto &worker : m_workers_data) {
+            std::lock_guard<std::mutex> lock(worker->mutex);
+            for (auto &queue : worker->tasks) {
+                // We don't know priority distribution, so we reserve uniform large buffers?
+                // Or we reserve total_capacity for EACH priority? No that's huge.
+                // We assume tasks are distributed somewhat evenly.
+                // Let's be safe: each priority queue gets `per_worker` capacity.
+                queue.resize(per_worker);
+            }
+        }
+    }
+
     void ThreadPool::dispatch(const std::vector<Task> &tasks) {
         if (tasks.empty())
             return;
-
         int num_workers = static_cast<int>(m_workers_data.size());
         if (num_workers == 0)
             return;
 
         m_active_tasks += static_cast<int>(tasks.size());
-
         {
             std::lock_guard<std::mutex> lock(m_cv_mutex);
             m_queued_tasks += static_cast<int>(tasks.size());
         }
 
-        const int priority = 4; // Normal
+        const int priority = 4;
 
         for (size_t i = 0; i < tasks.size(); ++i) {
             int worker_idx = i % num_workers;
-            {
-                std::lock_guard<std::mutex> lock(m_workers_data[worker_idx]->mutex);
-                m_workers_data[worker_idx]->tasks[priority].push_back(tasks[i]);
+            bool pushed = false;
+            while (!pushed) {
+                {
+                    std::lock_guard<std::mutex> lock(m_workers_data[worker_idx]->mutex);
+                    // tasks is const, so we copy.
+                    pushed = m_workers_data[worker_idx]->tasks[priority].push(tasks[i]);
+                }
+                if (!pushed)
+                    std::this_thread::yield();
             }
         }
         m_cv_work.notify_all();
@@ -61,7 +88,6 @@ namespace Plexus {
 
     void ThreadPool::enqueue(Task task, int priority) {
         m_active_tasks++;
-
         {
             std::lock_guard<std::mutex> lock(m_cv_mutex);
             m_queued_tasks++;
@@ -71,27 +97,46 @@ namespace Plexus {
 
         if (t_worker_index >= 0 && t_worker_index < static_cast<int>(m_workers_data.size())) {
             Worker &worker = *m_workers_data[t_worker_index];
+            bool pushed = false;
             {
                 std::lock_guard<std::mutex> lock(worker.mutex);
-                worker.tasks[p].push_back(std::move(task));
+                pushed = worker.tasks[p].push(std::move(task));
             }
-            m_cv_work.notify_one();
-        } else {
-            push_random(std::move(task), p);
+            if (pushed) {
+                m_cv_work.notify_one();
+                return;
+            }
+            // If local full, fall through to random/retry logic
         }
+
+        // Push Random / Retry
+        // Since we moved 'task' above if pushed, we need to be careful.
+        // Actually, if !pushed, 'task' was NOT moved from.
+        push_random(std::move(task), p);
     }
 
     void ThreadPool::push_random(Task task, int priority) {
         static thread_local std::mt19937 generator(std::random_device{}());
         std::uniform_int_distribution<int> distribution(0, static_cast<int>(m_workers_data.size()) -
                                                                1);
-        int idx = distribution(generator);
 
-        {
-            std::lock_guard<std::mutex> lock(m_workers_data[idx]->mutex);
-            m_workers_data[idx]->tasks[priority].push_back(std::move(task));
+        while (true) {
+            int idx = distribution(generator);
+            bool pushed = false;
+            {
+                std::lock_guard<std::mutex> lock(m_workers_data[idx]->mutex);
+                pushed = m_workers_data[idx]->tasks[priority].push(std::move(task));
+            }
+
+            if (pushed) {
+                m_cv_work.notify_one();
+                return;
+            }
+
+            // If full, yield and try again (possibly different worker if we re-roll, but keeping
+            // simple) Ideally we re-roll to find an empty queue.
+            std::this_thread::yield();
         }
-        m_cv_work.notify_one();
     }
 
     void ThreadPool::wait() {
@@ -112,8 +157,8 @@ namespace Plexus {
                 std::lock_guard<std::mutex> lock(my_worker.mutex);
                 for (int p = PRIORITY_LEVELS - 1; p >= 0; --p) {
                     if (!my_worker.tasks[p].empty()) {
-                        task = std::move(my_worker.tasks[p].back());
-                        my_worker.tasks[p].pop_back();
+                        // RingBuffer pop returns bool, and fills task
+                        my_worker.tasks[p].pop(task);
                         found_task = true;
                         break;
                     }
@@ -121,7 +166,6 @@ namespace Plexus {
             }
 
             if (found_task) {
-                // Decrement global queue count
                 std::lock_guard<std::mutex> lock(m_cv_mutex);
                 m_queued_tasks--;
             }
@@ -140,8 +184,7 @@ namespace Plexus {
                         std::lock_guard<std::mutex> lock(victim.mutex, std::adopt_lock);
                         for (int p = PRIORITY_LEVELS - 1; p >= 0; --p) {
                             if (!victim.tasks[p].empty()) {
-                                task = std::move(victim.tasks[p].front()); // FIFO stealing
-                                victim.tasks[p].pop_front();
+                                victim.tasks[p].pop(task);
                                 found_task = true;
                                 break;
                             }
@@ -157,14 +200,11 @@ namespace Plexus {
 
             if (!found_task) {
                 std::unique_lock<std::mutex> lock(m_cv_mutex);
-                // Wait until there are QUEUED tasks (ignore running ones)
                 m_cv_work.wait(lock, [this]() { return m_stop || m_queued_tasks > 0; });
-
                 if (m_stop && m_active_tasks == 0)
                     return;
             } else {
                 task();
-
                 int prev = m_active_tasks.fetch_sub(1);
                 if (prev == 1) {
                     std::lock_guard<std::mutex> lock(m_cv_mutex);
