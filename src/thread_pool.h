@@ -12,10 +12,6 @@ namespace Plexus {
     inline thread_local int t_worker_index = -1;
 
     /**
-     * @brief A simplified thread pool with a single global queue.
-     * This version removes work-stealing to debug the core synchronization issue.
-     */
-    /**
      * @brief A simplified thread pool with a single global queue using a ring buffer.
      * Guaranteed zero-allocation if reserve_task_capacity is used appropriately.
      */
