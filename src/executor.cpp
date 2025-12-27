@@ -19,7 +19,7 @@ namespace Plexus {
         auto start = std::chrono::high_resolution_clock::now();
 
         // 0. Pre-allocate Thread Pool Ring Buffers
-        m_pool->reserve_task_capacity(graph.nodes.size());
+        // m_pool->reserve_task_capacity(graph.nodes.size()); // DISABLED: Unsafe destructive resize
 
         // Reset State
         m_cancel_graph_execution = false;
@@ -114,7 +114,10 @@ namespace Plexus {
                 m_cancel_graph_execution = true;
                 // Decrement active count since we are stopping
                 m_active_task_count.fetch_sub(1);
-                m_cv_main_thread.notify_all();
+                {
+                    std::lock_guard<std::mutex> lock(m_main_queue_mutex);
+                    m_cv_main_thread.notify_all();
+                }
                 return;
             } else if (policy == ErrorPolicy::CancelDependents) {
                 skip_dependents = true;
@@ -124,7 +127,10 @@ namespace Plexus {
         // 2. Check Global Cancellation
         if (m_cancel_graph_execution) {
             m_active_task_count.fetch_sub(1);
-            m_cv_main_thread.notify_all();
+            {
+                std::lock_guard<std::mutex> lock(m_main_queue_mutex);
+                m_cv_main_thread.notify_all();
+            }
             return;
         }
 
@@ -159,6 +165,7 @@ namespace Plexus {
         // 4. Task Complete
         int remaining = m_active_task_count.fetch_sub(1) - 1;
         if (remaining == 0) {
+            std::lock_guard<std::mutex> lock(m_main_queue_mutex);
             m_cv_main_thread.notify_all();
         }
     }

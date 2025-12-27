@@ -7,13 +7,6 @@
 
 namespace Plexus {
     /**
-     * @brief Roughly a baked schedule of tasks.
-     *
-     * An ExecutionGraph organizes tasks into "Waves". All tasks in a single wave
-     * are guaranteed to be independent of each other (conforming to dependencies)
-     * and can safely run in parallel.
-     */
-    /**
      * @brief A baked dependency graph for asynchronous execution.
      *
      * Nodes are executed as soon as their dependencies are met.

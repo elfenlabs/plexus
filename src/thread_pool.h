@@ -181,11 +181,8 @@ namespace Plexus {
                 // 2. Try stealing
                 if (!found_task) {
                     int num_workers = static_cast<int>(m_workers_data.size());
-                    for (int i = 0; i < num_workers; ++i) {
-                        if (i == index)
-                            continue;
-
-                        int victim_idx = (index + i + 1) % num_workers;
+                    for (int i = 1; i < num_workers; ++i) {
+                        int victim_idx = (index + i) % num_workers;
                         Worker &victim = *m_workers_data[victim_idx];
 
                         if (victim.mutex.try_lock()) {
@@ -212,7 +209,14 @@ namespace Plexus {
                     if (m_stop && m_active_tasks == 0)
                         return;
                 } else {
-                    task();
+                    try {
+                        task();
+                    } catch (...) {
+                        // Inherit exception handling policy or just log?
+                        // For a generic thread pool, we might want to store it,
+                        // but here we just ensure we don't kill the thread
+                        // and crucially, we MUST decrement the active count.
+                    }
                     int prev = m_active_tasks.fetch_sub(1);
                     if (prev == 1) {
                         std::lock_guard<std::mutex> lock(m_cv_mutex);
