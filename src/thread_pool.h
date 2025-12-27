@@ -19,8 +19,8 @@ namespace Plexus {
     public:
         using Task = std::function<void()>;
 
-        ThreadPool() {
-            unsigned int count = std::thread::hardware_concurrency();
+        ThreadPool(int num_threads = 0) {
+            unsigned int count = num_threads ? num_threads : std::thread::hardware_concurrency();
             if (count == 0)
                 count = 2;
             if (count > 1)
