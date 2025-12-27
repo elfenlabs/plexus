@@ -290,8 +290,11 @@ namespace Plexus {
                 }
 
                 if (!found_task) {
-                    // 3. Spin-Wait
-                    for (int i = 0; i < 64; ++i) {
+                    // 3. Spin-Wait: Try other queues before blocking
+                    // Instead of checking our own queue 64 times, check all queues a few times
+                    const int spin_iterations = queue_count > 1 ? 8 : 16;
+                    for (int spin = 0; spin < spin_iterations && !found_task; ++spin) {
+                        // Check local queue first
                         {
                             std::lock_guard<std::mutex> lock(m_queues[index]->mutex);
                             if (m_queues[index]->queue.pop_back(task)) {
@@ -300,7 +303,26 @@ namespace Plexus {
                                 break;
                             }
                         }
-                        std::this_thread::yield();
+
+                        // Then check other queues if we have multiple
+                        if (!found_task && queue_count > 1) {
+                            for (size_t i = 1; i < queue_count && !found_task; ++i) {
+                                size_t steal_idx = (index + i) % queue_count;
+                                if (std::unique_lock<std::mutex> lock(m_queues[steal_idx]->mutex,
+                                                                      std::try_to_lock);
+                                    lock) {
+                                    if (m_queues[steal_idx]->queue.pop(task)) {
+                                        m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
+                                        found_task = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!found_task) {
+                            std::this_thread::yield();
+                        }
                     }
 
                     // 4. Wait
