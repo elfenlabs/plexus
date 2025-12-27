@@ -22,27 +22,49 @@ static void BM_ThreadPool_Throughput(benchmark::State &state) {
     state.SetItemsProcessed(state.iterations() * state.range(0));
 }
 
-// Test with varying number of tasks
 BENCHMARK(BM_ThreadPool_Throughput)->Range(100, 10000);
 
 static void BM_ThreadPool_EnqueueOnly(benchmark::State &state) {
     Plexus::ThreadPool pool;
-    // Determine total tasks to avoid resizing during the loop as much as possible
-    // or we accept resizing as part of the benchmark.
 
-    // We want to measure just the enqueue cost.
-    // This is tricky because the workers will start draining immediately.
+    // Use a blocking flag to prevent tasks from completing during measurement
+    std::atomic<bool> block{true};
 
     for (auto _ : state) {
-        // We pause timing to clear the pool
-        state.PauseTiming();
-        pool.wait();
-        state.ResumeTiming();
-
+        // Enqueue tasks that will block until we release them
         for (int i = 0; i < state.range(0); ++i) {
-            pool.enqueue([]() { benchmark::DoNotOptimize(1); });
+            pool.enqueue([&block]() {
+                // Spin until released
+                while (block.load(std::memory_order_relaxed)) {
+                    std::this_thread::yield();
+                }
+                benchmark::DoNotOptimize(1);
+            });
         }
+
+        // Stop timing before we release the tasks
+        state.PauseTiming();
+        block.store(false, std::memory_order_relaxed);
+        pool.wait();
+        block.store(true, std::memory_order_relaxed);
+        state.ResumeTiming();
     }
     state.SetItemsProcessed(state.iterations() * state.range(0));
 }
 BENCHMARK(BM_ThreadPool_EnqueueOnly)->Range(100, 10000);
+
+static void BM_ThreadPool_ExecutionOverhead(benchmark::State &state) {
+    Plexus::ThreadPool pool;
+
+    for (auto _ : state) {
+        for (int i = 0; i < state.range(0); ++i) {
+            pool.enqueue([]() {
+                // Minimal work - just measure the overhead of task execution
+                benchmark::DoNotOptimize(1);
+            });
+        }
+        pool.wait();
+    }
+    state.SetItemsProcessed(state.iterations() * state.range(0));
+}
+BENCHMARK(BM_ThreadPool_ExecutionOverhead)->Range(100, 10000);
