@@ -94,6 +94,11 @@ namespace Plexus {
             if (count > 1)
                 count--;
 
+            m_queues.reserve(count);
+            for (unsigned int i = 0; i < count; ++i) {
+                m_queues.push_back(std::make_unique<WorkQueue>());
+            }
+            // Threads must be started after queues are initialized
             for (unsigned int i = 0; i < count; ++i) {
                 m_threads.emplace_back(&ThreadPool::worker_thread, this, i);
             }
@@ -119,79 +124,157 @@ namespace Plexus {
             if (tasks.empty())
                 return;
 
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_active_tasks += static_cast<int>(tasks.size());
-                for (auto &task : tasks) {
-                    m_queue.push(std::move(task));
+            // Atomic increment, no lock needed
+            m_active_tasks.fetch_add(static_cast<int>(tasks.size()), std::memory_order_relaxed);
+
+            int queue_idx = 0;
+            // Use thread-local index if available, otherwise round-robin
+            if (t_worker_index >= 0 && static_cast<size_t>(t_worker_index) < m_queues.size()) {
+                queue_idx = t_worker_index;
+            }
+
+            for (auto &task : tasks) {
+                bool pushed = false;
+                // Try strictly local first
+                {
+                    std::lock_guard<std::mutex> guard(m_queues[queue_idx]->mutex);
+                    pushed = m_queues[queue_idx]->queue.push(std::move(task));
+                }
+
+                if (!pushed) {
+                    // Fallback to resizing the queue (RingBuffer auto-resizes in push)
+                    // The only reason push returns false is not handled by RingBuffer yet (it
+                    // always returns true) But if we wanted to balance load:
+                    queue_idx = (queue_idx + 1) % m_queues.size();
+                    std::lock_guard<std::mutex> guard(m_queues[queue_idx]->mutex);
+                    m_queues[queue_idx]->queue.push(std::move(task));
                 }
             }
+            // Notify all because we pushed multiple tasks
             m_cv_work.notify_all();
         }
 
         template <typename F> void enqueue(F &&f, int priority = 4) {
             (void)priority;
+
+            if (m_stop)
+                throw std::runtime_error("ThreadPool stopped");
+
+            m_active_tasks.fetch_add(1, std::memory_order_relaxed);
+
+            // Determine target queue
+            size_t target_idx = 0;
+            if (t_worker_index >= 0 && static_cast<size_t>(t_worker_index) < m_queues.size()) {
+                target_idx = static_cast<size_t>(t_worker_index);
+            } else {
+                // Round-robin for external threads
+                static std::atomic<size_t> next_idx{0};
+                target_idx = next_idx.fetch_add(1, std::memory_order_relaxed) % m_queues.size();
+            }
+
             {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                if (m_stop)
-                    throw std::runtime_error("ThreadPool stopped");
-                m_active_tasks++;
-                // RingBuffer::push might auto-resize (allocate), but we aim to pre-reserve.
-                m_queue.push(Task(std::forward<F>(f)));
+                std::lock_guard<std::mutex> lock(m_queues[target_idx]->mutex);
+                m_queues[target_idx]->queue.push(Task(std::forward<F>(f)));
             }
             m_cv_work.notify_one();
         }
 
         void wait() {
             std::unique_lock<std::mutex> lock(m_mutex);
-            m_cv_done.wait(lock, [this]() { return m_active_tasks == 0; });
+            m_cv_done.wait(
+                lock, [this]() { return m_active_tasks.load(std::memory_order_relaxed) == 0; });
         }
 
         void reserve_task_capacity(size_t capacity) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_queue.resize(capacity);
+            if (m_queues.empty())
+                return;
+            size_t per_queue = (capacity + m_queues.size() - 1) / m_queues.size();
+            // Add some slack for uneven distribution
+            per_queue += 32;
+
+            for (auto &q : m_queues) {
+                std::lock_guard<std::mutex> lock(q->mutex);
+                q->queue.resize(per_queue);
+            }
         }
 
     private:
+        struct alignas(64) WorkQueue {
+            std::mutex mutex;
+            RingBuffer<Task> queue;
+        };
+
+        std::vector<std::unique_ptr<WorkQueue>> m_queues;
         std::vector<std::thread> m_threads;
-        RingBuffer<Task> m_queue; // Using RingBuffer locally
+
+        // Global synchronization for completion and stopping
         std::mutex m_mutex;
         std::condition_variable m_cv_work;
         std::condition_variable m_cv_done;
         bool m_stop = false;
-        int m_active_tasks = 0;
+        std::atomic<int> m_active_tasks{0}; // Atomic now as it's modified by multiple threads
 
         void worker_thread(int index) {
             t_worker_index = index;
+            const size_t queue_count = m_queues.size();
 
             while (true) {
                 Task task;
+                bool found_task = false;
 
+                // 1. Try local queue
                 {
-                    std::unique_lock<std::mutex> lock(m_mutex);
-                    m_cv_work.wait(lock, [this]() { return m_stop || !m_queue.empty(); });
-
-                    if (m_stop && m_queue.empty())
-                        return;
-
-                    // RingBuffer internal check
-                    if (!m_queue.empty()) {
-                        m_queue.pop(task);
-                    } else {
-                        continue;
+                    std::lock_guard<std::mutex> lock(m_queues[index]->mutex);
+                    if (m_queues[index]->queue.pop(task)) {
+                        found_task = true;
                     }
                 }
 
-                try {
-                    task();
-                } catch (...) {
-                    // Task threw
+                // 2. Steal from others
+                if (!found_task) {
+                    for (size_t i = 1; i < queue_count; ++i) {
+                        size_t steal_idx = (index + i) % queue_count;
+                        // Determine if we should contend for lock?
+                        // For simplicity, just try locking
+                        if (std::unique_lock<std::mutex> lock(m_queues[steal_idx]->mutex,
+                                                              std::try_to_lock);
+                            lock) {
+                            if (!m_queues[steal_idx]->queue.empty()) {
+                                if (m_queues[steal_idx]->queue.pop(task)) {
+                                    found_task = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
 
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    m_active_tasks--;
-                    if (m_active_tasks == 0) {
+                if (!found_task) {
+                    // 3. Wait if no work found anywhere
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    if (m_stop)
+                        return;
+
+                    // Double check active tasks or similar?
+                    // To avoid missed notifications, we should ideally check queues again under
+                    // lock or use a semaphore. But checking all queues is slow. For now, simple
+                    // wait.
+                    m_cv_work.wait(lock);
+
+                    if (m_stop)
+                        return;
+                }
+
+                if (found_task) {
+                    try {
+                        task();
+                    } catch (...) {
+                        // Task threw
+                    }
+
+                    int remaining = m_active_tasks.fetch_sub(1, std::memory_order_release) - 1;
+                    if (remaining == 0) {
+                        std::lock_guard<std::mutex> lock(m_mutex);
                         m_cv_done.notify_all();
                     }
                 }
