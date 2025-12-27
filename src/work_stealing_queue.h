@@ -70,25 +70,16 @@ namespace Plexus {
             std::atomic_thread_fence(std::memory_order_seq_cst);
             int64_t b = m_bottom.load(std::memory_order_acquire);
 
-            std::optional<T> ret;
-
             if (t < b) {
-                // Non-empty
-                ret =
-                    std::move(m_buffer[t & m_mask]); // Speculative load? Chase-Lev is tricky here.
-                // Standard Chase-Lev loads *item* before CAS?
-                // Wait. If we read buffer[t] and then CAS fails, someone else took it.
-                // Is it safe to read buffer[t] concurrently with owner writing?
-                // Owner writes at 'b'. t < b means safe?
-                // Yes, owner pushes at b. thief reads at t.
-                // Owner pops at b-1.
-                // If t < b, we are at least 1 item apart? No, if t = b-1, we are same slot.
-
+                // Non-empty - try to claim this slot
                 if (!m_top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst,
                                                    std::memory_order_relaxed)) {
-                    return std::nullopt; // Failed
+                    return std::nullopt; // Failed to claim - another thief got it
                 }
-                return ret;
+
+                // Successfully claimed slot t - now safe to read the buffer
+                // No other thread will access this slot now
+                return std::move(m_buffer[t & m_mask]);
             }
             return std::nullopt;
         }
