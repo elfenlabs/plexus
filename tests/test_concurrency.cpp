@@ -88,12 +88,12 @@ TEST(ConcurrencyTest, IndependentTasks) {
     Plexus::ThreadPool pool;
     std::atomic<int> count{0};
 
-    std::vector<std::function<void()>> tasks;
+    std::vector<Plexus::ThreadPool::Task> tasks;
     for (int i = 0; i < 50; ++i) {
         tasks.push_back([&]() { count++; });
     }
 
-    pool.dispatch(tasks);
+    pool.dispatch(std::move(tasks));
     pool.wait();
 
     EXPECT_EQ(count, 50);

@@ -19,7 +19,7 @@ namespace Plexus {
         auto start = std::chrono::high_resolution_clock::now();
 
         // 0. Pre-allocate Thread Pool Ring Buffers
-        // m_pool->reserve_task_capacity(graph.nodes.size()); // DISABLED: Unsafe destructive resize
+        m_pool->reserve_task_capacity(graph.nodes.size());
 
         // Reset State
         m_cancel_graph_execution = false;
