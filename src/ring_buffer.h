@@ -20,20 +20,30 @@ namespace Plexus {
             if (new_capacity <= m_capacity)
                 return;
 
-            m_buffer = std::make_unique<T[]>(new_capacity);
+            auto new_buffer = std::make_unique<T[]>(new_capacity);
+            if (m_count > 0) {
+                size_t current = m_head;
+                for (size_t i = 0; i < m_count; ++i) {
+                    new_buffer[i] = std::move(m_buffer[current]);
+                    current = (current + 1) % m_capacity;
+                }
+            }
+
+            m_buffer = std::move(new_buffer);
             m_capacity = new_capacity;
             m_head = 0;
-            m_tail = 0;
-            m_count = 0;
+            m_tail = m_count;
         }
 
         /**
          * @brief Pushes an item into the buffer.
-         * @return true if successful, false if full.
+         * Auto-resizes if full.
+         * @return true always (unless allocation fails).
          */
         bool push(T item) {
-            if (m_count == m_capacity)
-                return false;
+            if (m_count == m_capacity) {
+                resize(m_capacity == 0 ? 16 : m_capacity * 2);
+            }
 
             m_buffer[m_tail] = std::move(item);
             m_tail = (m_tail + 1) % m_capacity;

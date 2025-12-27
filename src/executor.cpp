@@ -97,6 +97,25 @@ namespace Plexus {
     }
 
     void Executor::run_task(const ExecutionGraph &graph, std::atomic<int> *counters, int node_idx) {
+        // RAII to ensure the current task is always decremented on exit
+        struct DoneGuard {
+            Executor &exec;
+            DoneGuard(Executor &e) : exec(e) {}
+            ~DoneGuard() {
+                // If we are unwinding due to an uncaught exception (e.g. enqueue failed),
+                // we should signal cancellation if not already done.
+                if (std::uncaught_exceptions() > 0) {
+                    exec.m_cancel_graph_execution = true;
+                }
+
+                int remaining = exec.m_active_task_count.fetch_sub(1) - 1;
+                if (remaining == 0 || exec.m_cancel_graph_execution) {
+                    std::lock_guard<std::mutex> lock(exec.m_main_queue_mutex);
+                    exec.m_cv_main_thread.notify_all();
+                }
+            }
+        } done_guard(*this);
+
         bool skip_dependents = false;
 
         // 1. Run User Work
@@ -112,12 +131,7 @@ namespace Plexus {
 
             if (policy == ErrorPolicy::CancelGraph) {
                 m_cancel_graph_execution = true;
-                // Decrement active count since we are stopping
-                m_active_task_count.fetch_sub(1);
-                {
-                    std::lock_guard<std::mutex> lock(m_main_queue_mutex);
-                    m_cv_main_thread.notify_all();
-                }
+                // DoneGuard will handle decrement and notify
                 return;
             } else if (policy == ErrorPolicy::CancelDependents) {
                 skip_dependents = true;
@@ -126,11 +140,6 @@ namespace Plexus {
 
         // 2. Check Global Cancellation
         if (m_cancel_graph_execution) {
-            m_active_task_count.fetch_sub(1);
-            {
-                std::lock_guard<std::mutex> lock(m_main_queue_mutex);
-                m_cv_main_thread.notify_all();
-            }
             return;
         }
 
@@ -147,27 +156,33 @@ namespace Plexus {
                     // Increment active count BEFORE enqueueing
                     m_active_task_count.fetch_add(1);
 
-                    if (graph.nodes[dep_idx].thread_affinity == ThreadAffinity::Main) {
-                        {
-                            std::lock_guard<std::mutex> lock(m_main_queue_mutex);
-                            m_main_queue_backlog.push_back(dep_idx);
+                    try {
+                        if (graph.nodes[dep_idx].thread_affinity == ThreadAffinity::Main) {
+                            {
+                                std::lock_guard<std::mutex> lock(m_main_queue_mutex);
+                                m_main_queue_backlog.push_back(dep_idx);
+                            }
+                            m_cv_main_thread.notify_one();
+                        } else {
+                            m_pool->enqueue([this, &graph, counters,
+                                             dep_idx]() { run_task(graph, counters, dep_idx); },
+                                            graph.nodes[dep_idx].priority);
                         }
-                        m_cv_main_thread.notify_one();
-                    } else {
-                        m_pool->enqueue([this, &graph, counters,
-                                         dep_idx]() { run_task(graph, counters, dep_idx); },
-                                        graph.nodes[dep_idx].priority);
+                    } catch (...) {
+                        // Rollback count for the child we failed to enqueue
+                        m_active_task_count.fetch_sub(1);
+                        // Signal failure
+                        m_cancel_graph_execution = true;
+                        std::lock_guard<std::mutex> lock(m_exception_mutex);
+                        m_exceptions.push_back(std::current_exception());
+                        // Continue loop? No, graph is broken.
+                        break;
                     }
                 }
             }
         }
 
-        // 4. Task Complete
-        int remaining = m_active_task_count.fetch_sub(1) - 1;
-        if (remaining == 0) {
-            std::lock_guard<std::mutex> lock(m_main_queue_mutex);
-            m_cv_main_thread.notify_all();
-        }
+        // DoneGuard destructor handles Step 4.
     }
 
-} // namespace Plexus
+}
