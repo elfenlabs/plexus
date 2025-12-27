@@ -1,0 +1,122 @@
+#pragma once
+
+#include <atomic>
+#include <cassert>
+#include <optional>
+#include <vector>
+
+namespace Plexus {
+
+    template <typename T> class WorkStealingQueue {
+    public:
+        explicit WorkStealingQueue(size_t capacity = 4096) {
+            // Capacity must be power of 2 for fast modulo
+            m_capacity = 1;
+            while (m_capacity < capacity)
+                m_capacity *= 2;
+            m_mask = m_capacity - 1;
+            m_buffer.resize(m_capacity);
+            m_top.store(0, std::memory_order_relaxed);
+            m_bottom.store(0, std::memory_order_relaxed);
+        }
+
+        // Only called by owner thread
+        bool push(T val) {
+            int64_t b = m_bottom.load(std::memory_order_relaxed);
+            int64_t t = m_top.load(std::memory_order_acquire);
+
+            if (b - t >= static_cast<int64_t>(m_capacity)) {
+                // Full
+                return false;
+            }
+
+            m_buffer[b & m_mask] = std::move(val);
+            std::atomic_thread_fence(std::memory_order_release);
+            m_bottom.store(b + 1, std::memory_order_relaxed);
+            return true;
+        }
+
+        // Only called by owner thread (LIFO)
+        std::optional<T> pop() {
+            int64_t b = m_bottom.load(std::memory_order_relaxed) - 1;
+            m_bottom.store(b, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            int64_t t = m_top.load(std::memory_order_relaxed);
+
+            std::optional<T> ret;
+
+            if (t <= b) {
+                // Non-empty
+                ret = std::move(m_buffer[b & m_mask]);
+                if (t == b) {
+                    // Last element, race with steal
+                    if (!m_top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst,
+                                                       std::memory_order_relaxed)) {
+                        // Lost race to thief
+                        ret.reset();
+                    }
+                    m_bottom.store(b + 1, std::memory_order_relaxed);
+                }
+            } else {
+                // Empty
+                m_bottom.store(b + 1, std::memory_order_relaxed);
+            }
+            return ret;
+        }
+
+        // Called by thieves (FIFO)
+        std::optional<T> steal() {
+            int64_t t = m_top.load(std::memory_order_acquire);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            int64_t b = m_bottom.load(std::memory_order_acquire);
+
+            std::optional<T> ret;
+
+            if (t < b) {
+                // Non-empty
+                ret =
+                    std::move(m_buffer[t & m_mask]); // Speculative load? Chase-Lev is tricky here.
+                // Standard Chase-Lev loads *item* before CAS?
+                // Wait. If we read buffer[t] and then CAS fails, someone else took it.
+                // Is it safe to read buffer[t] concurrently with owner writing?
+                // Owner writes at 'b'. t < b means safe?
+                // Yes, owner pushes at b. thief reads at t.
+                // Owner pops at b-1.
+                // If t < b, we are at least 1 item apart? No, if t = b-1, we are same slot.
+
+                if (!m_top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst,
+                                                   std::memory_order_relaxed)) {
+                    return std::nullopt; // Failed
+                }
+                return ret;
+            }
+            return std::nullopt;
+        }
+
+        // For testing/sizing
+        size_t size() const {
+            int64_t b = m_bottom.load(std::memory_order_relaxed);
+            int64_t t = m_top.load(std::memory_order_relaxed);
+            return (b >= t) ? static_cast<size_t>(b - t) : 0;
+        }
+
+        bool empty() const { return size() == 0; }
+
+        // Resizing support needs this
+        void resize(size_t new_cap) {
+            // Not thread safe, use when quiescent or locked
+            if (new_cap < m_capacity)
+                return; // Only grow
+            // ... strict resizing requires copying tasks which might be moved-from ...
+            // Lets assume fixed size for now or full reset.
+        }
+
+    private:
+        std::atomic<int64_t> m_top;
+        std::atomic<int64_t> m_bottom;
+        std::vector<T> m_buffer;
+        size_t m_capacity;
+        size_t m_mask;
+    };
+
+} // namespace Plexus

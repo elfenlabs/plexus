@@ -12,8 +12,16 @@ namespace Plexus {
     inline thread_local int t_worker_index = -1;
 
     /**
-     * @brief A simplified thread pool with a single global queue using a ring buffer.
-     * Guaranteed zero-allocation if reserve_task_capacity is used appropriately.
+     * @brief A high-performance, work-stealing thread pool.
+     *
+     * Features:
+     * - **Zero-Allocation**: Uses a pre-allocated deque and type-erased `FixedFunction` (64 bytes)
+     * to avoid heap allocation for tasks.
+     * - **Work Stealing**: Idle threads steal work from other threads using randomized victim
+     * selection.
+     * - **Hybrid Lock-Free Deque**: Implements a split-lock queue (`WorkStealingQueue`) minimizing
+     * contention.
+     * - **LIFO Scheduling**: Local workers pop from the back (LIFO) for better cache locality.
      */
     class ThreadPool {
     public:
