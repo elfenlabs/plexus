@@ -65,6 +65,19 @@ namespace Plexus {
             return true;
         }
 
+        size_t pop_batch(std::vector<T> &out_batch, size_t max_count) {
+            if (m_count == 0)
+                return 0;
+
+            size_t count = std::min(m_count, max_count);
+            for (size_t i = 0; i < count; ++i) {
+                out_batch.push_back(std::move(m_buffer[m_head]));
+                m_head = (m_head + 1) % m_capacity;
+            }
+            m_count -= count;
+            return count;
+        }
+
         [[nodiscard]] bool empty() const { return m_count == 0; }
         [[nodiscard]] bool full() const { return m_count == m_capacity; }
         [[nodiscard]] size_t size() const { return m_count; }
