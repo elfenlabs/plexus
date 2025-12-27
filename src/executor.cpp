@@ -146,12 +146,12 @@ namespace Plexus {
         // 3. Trigger Dependents
         if (!skip_dependents) {
             for (int dep_idx : graph.nodes[node_idx].dependents) {
-                int prev = counters[dep_idx].fetch_sub(1, std::memory_order_release);
+                // Use acq_rel: release for publishing our completion, acquire for reading dep_idx
+                // node data
+                int prev = counters[dep_idx].fetch_sub(1, std::memory_order_acq_rel);
                 if (prev == 1) {
                     if (m_cancel_graph_execution)
                         break;
-
-                    std::atomic_thread_fence(std::memory_order_acquire);
 
                     // Increment active count BEFORE enqueueing
                     m_active_task_count.fetch_add(1);
