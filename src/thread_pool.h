@@ -241,22 +241,18 @@ namespace Plexus {
         void worker_thread(int index) {
             t_worker_index = index;
             const size_t queue_count = m_queues.size();
+            int local_task_count = 0; // Track tasks locally for batch decrement
 
             while (true) {
                 std::optional<Task> task_opt;
 
                 // 1. Try local queue (LIFO for cache locality) - LOCK-FREE
                 task_opt = m_queues[index]->queue.pop();
-                if (task_opt.has_value()) {
-                    m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
-                } else {
+                if (!task_opt.has_value()) {
                     // 2. Steal from other worker queues - LOCK-FREE
                     for (size_t i = 0; !task_opt.has_value() && i < queue_count - 1; ++i) {
                         size_t steal_idx = (index + i + 1) % queue_count;
                         task_opt = m_queues[steal_idx]->queue.steal();
-                        if (task_opt.has_value()) {
-                            m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
-                        }
                     }
                 }
 
@@ -266,7 +262,6 @@ namespace Plexus {
                     if (lock && !m_overflow_queue.empty()) {
                         task_opt = std::move(m_overflow_queue.front());
                         m_overflow_queue.pop_front();
-                        m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
                     }
                 }
 
@@ -277,7 +272,6 @@ namespace Plexus {
                         // Quick check local queue
                         task_opt = m_queues[index]->queue.pop();
                         if (task_opt.has_value()) {
-                            m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
                             break;
                         }
 
@@ -287,7 +281,6 @@ namespace Plexus {
                             if (lock && !m_overflow_queue.empty()) {
                                 task_opt = std::move(m_overflow_queue.front());
                                 m_overflow_queue.pop_front();
-                                m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
                                 break;
                             }
                         }
@@ -301,6 +294,12 @@ namespace Plexus {
 
                 // 5. Wait for work (blocking) - use per-worker CV
                 if (!task_opt.has_value()) {
+                    // Batch decrement: update counter once before sleeping
+                    if (local_task_count > 0) {
+                        m_queued_tasks.fetch_sub(local_task_count, std::memory_order_relaxed);
+                        local_task_count = 0;
+                    }
+
                     std::unique_lock<std::mutex> lock(m_queues[index]->mutex);
                     m_queues[index]->sleeping.store(true, std::memory_order_relaxed);
                     m_queues[index]->cv.wait(lock, [this]() {
@@ -314,6 +313,9 @@ namespace Plexus {
 
                     continue;
                 }
+
+                // Track task locally (will batch decrement later)
+                ++local_task_count;
 
                 // Execute task (we know task_opt.has_value() is true here)
                 assert(task_opt.has_value() && "task_opt must have value before execution");
