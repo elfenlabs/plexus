@@ -247,7 +247,36 @@ namespace Plexus {
                     }
                 }
 
-                // 5. Wait for work
+                // 4. Exponential backoff spin-wait before blocking
+                if (!task_opt.has_value()) {
+                    constexpr int max_spins = 64;
+                    for (int spin = 1; spin <= max_spins; spin *= 2) {
+                        // Quick check local queue
+                        task_opt = m_queues[index]->queue.pop();
+                        if (task_opt.has_value()) {
+                            m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
+                            break;
+                        }
+
+                        // Quick check overflow queue
+                        {
+                            std::unique_lock<std::mutex> lock(m_overflow_mutex, std::try_to_lock);
+                            if (lock && !m_overflow_queue.empty()) {
+                                task_opt = std::move(m_overflow_queue.front());
+                                m_overflow_queue.pop_front();
+                                m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
+                                break;
+                            }
+                        }
+
+                        // Backoff: yield multiple times based on spin iteration
+                        for (int y = 0; y < spin; ++y) {
+                            std::this_thread::yield();
+                        }
+                    }
+                }
+
+                // 5. Wait for work (blocking)
                 if (!task_opt.has_value()) {
                     std::unique_lock<std::mutex> lock(m_mutex);
                     m_cv_work.wait(lock, [this]() {
