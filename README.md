@@ -12,11 +12,12 @@
 - **Graph Visualization**: Textual debug output for auditing the baked execution graph structure and priorities.
 - **Fail-Fast Safety**: Immediate termination on cyclic dependencies or invalid access patterns during baking.
 - **Modern C++**: Built with C++20.
-- **Optimized Thread Pool**:
-    - **Zero-Allocation**: Pre-allocated task storage prevents heap fragmentation and overhead during execution.
-    - **Work-Stealing Algorithm**: Randomized victim selection ensures even load distribution across cores.
-    - **Hybrid Lock-Free Deque**: Utilizes a split-lock architecture (wait-free push/pop for owner) to minimize contention.
+- **Lock-Free Thread Pool**:
+    - **Chase-Lev Work-Stealing Deque**: Each worker has its own lock-free deque for push/pop operations.
+    - **Single-Owner Semantics**: Workers push spawned tasks to their own queue, ensuring true lock-free performance.
     - **LIFO Local Scheduling**: Improves CPU cache locality by prioritizing recently added local tasks.
+    - **FIFO Work-Stealing**: Idle workers steal oldest tasks from busy workers for better load distribution.
+    - **Central Overflow Queue**: External submissions go to a mutex-protected central queue, preventing contention on worker queues.
 
 ## Building
 
