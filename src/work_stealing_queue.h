@@ -29,15 +29,16 @@ namespace Plexus {
         std::size_t capacity() const noexcept { return m_capacity; }
 
         // Owner thread only
-        bool push(T value) {
+        // Takes const ref to avoid consuming value on failure
+        template <typename U = T> bool push(U &&value) {
             const int64_t b = m_bottom.load(std::memory_order_relaxed);
             const int64_t t = m_top.load(std::memory_order_acquire);
 
             if (b - t >= static_cast<int64_t>(m_capacity)) {
-                return false; // full
+                return false; // full - value not consumed
             }
 
-            m_buffer[static_cast<std::size_t>(b) & m_mask].emplace(std::move(value));
+            m_buffer[static_cast<std::size_t>(b) & m_mask].emplace(std::forward<U>(value));
 
             // Publish: the buffer write must happen-before thieves observe the new bottom.
             m_bottom.store(b + 1, std::memory_order_release);
@@ -76,6 +77,12 @@ namespace Plexus {
             }
             // If t < b, it wasn't the last element; no one else touches idx.
 
+            // CRITICAL: The slot MUST have a value here. If it doesn't, there's a race condition.
+            if (!m_buffer[idx].has_value()) {
+                // This should never happen in a correct Chase-Lev implementation
+                return std::nullopt;
+            }
+
             std::optional<T> out;
             out.emplace(std::move(*m_buffer[idx]));
             m_buffer[idx].reset();
@@ -105,6 +112,12 @@ namespace Plexus {
 
             // bottom.load(acquire) above synchronizes with push's bottom.store(release),
             // so the buffer slot is visible here.
+            // CRITICAL: The slot MUST have a value here. If it doesn't, there's a race condition.
+            if (!m_buffer[idx].has_value()) {
+                // This should never happen in a correct Chase-Lev implementation
+                return std::nullopt;
+            }
+
             std::optional<T> out;
             out.emplace(std::move(*m_buffer[idx]));
             m_buffer[idx].reset();
@@ -144,9 +157,9 @@ namespace Plexus {
         alignas(cacheline_size()) std::atomic<int64_t> m_top{0};
         alignas(cacheline_size()) std::atomic<int64_t> m_bottom{0};
 
-        std::vector<std::optional<T>> m_buffer;
         std::size_t m_capacity{0};
         std::size_t m_mask{0};
+        std::vector<std::optional<T>> m_buffer;
     };
 
 } // namespace Plexus

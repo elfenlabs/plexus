@@ -1,7 +1,9 @@
 #pragma once
-#include "ring_buffer.h"
+#include "work_stealing_queue.h"
 #include <atomic>
+#include <cassert>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -15,12 +17,12 @@ namespace Plexus {
      * @brief A high-performance, work-stealing thread pool.
      *
      * Features:
-     * - **Zero-Allocation**: Uses a pre-allocated deque and type-erased `FixedFunction` (64 bytes)
-     * to avoid heap allocation for tasks.
-     * - **Work Stealing**: Idle threads steal work from other threads using randomized victim
-     * selection.
-     * - **Hybrid Lock-Free Deque**: Implements a split-lock queue (`WorkStealingQueue`) minimizing
-     * contention.
+     * - **Lock-Free Per-Worker Queues**: Each worker has a `WorkStealingQueue` (Chase-Lev
+     * algorithm) for lock-free local operations.
+     * - **Work Stealing**: Idle threads steal work from other threads using the lock-free
+     * `steal()` method.
+     * - **Central Overflow Queue**: When worker queues are full, tasks spill to a mutex-protected
+     * central queue.
      * - **LIFO Scheduling**: Local workers pop from the back (LIFO) for better cache locality.
      */
     class ThreadPool {
@@ -136,28 +138,32 @@ namespace Plexus {
             m_active_tasks.fetch_add(static_cast<int>(tasks.size()), std::memory_order_relaxed);
             m_queued_tasks.fetch_add(static_cast<int>(tasks.size()), std::memory_order_relaxed);
 
-            int queue_idx = 0;
-            // Use thread-local index if available, otherwise round-robin
+            size_t queue_idx = 0;
+            // Use thread-local index if available, otherwise start at 0
             if (t_worker_index >= 0 && static_cast<size_t>(t_worker_index) < m_queues.size()) {
-                queue_idx = t_worker_index;
+                queue_idx = static_cast<size_t>(t_worker_index);
             }
 
+            const size_t num_queues = m_queues.size();
+
             for (auto &task : tasks) {
+                // Try to push to target worker queue
+                // Lock required because Chase-Lev push() assumes single-owner
+                size_t idx = queue_idx % num_queues;
                 bool pushed = false;
-                // Try strictly local first
                 {
-                    std::lock_guard<std::mutex> guard(m_queues[queue_idx]->mutex);
-                    pushed = m_queues[queue_idx]->queue.push(std::move(task));
+                    std::lock_guard<std::mutex> lock(m_queues[idx]->push_mutex);
+                    pushed = m_queues[idx]->queue.push(std::move(task));
                 }
 
                 if (!pushed) {
-                    // Fallback to resizing the queue (RingBuffer auto-resizes in push)
-                    // The only reason push returns false is not handled by RingBuffer yet (it
-                    // always returns true) But if we wanted to balance load:
-                    queue_idx = (queue_idx + 1) % m_queues.size();
-                    std::lock_guard<std::mutex> guard(m_queues[queue_idx]->mutex);
-                    m_queues[queue_idx]->queue.push(std::move(task));
+                    // Queue full, spill to central overflow
+                    std::lock_guard<std::mutex> lock(m_overflow_mutex);
+                    m_overflow_queue.push_back(std::move(task));
                 }
+
+                // Move to next queue for load balancing
+                queue_idx = (queue_idx + 1) % num_queues;
             }
             // Notify all because we pushed multiple tasks
             m_cv_work.notify_all();
@@ -180,9 +186,18 @@ namespace Plexus {
                 target_idx = next_idx.fetch_add(1, std::memory_order_relaxed) % m_queues.size();
             }
 
+            Task task(std::forward<F>(f));
+            bool pushed = false;
             {
-                std::lock_guard<std::mutex> lock(m_queues[target_idx]->mutex);
-                m_queues[target_idx]->queue.push(Task(std::forward<F>(f)));
+                // Lock required because Chase-Lev push() assumes single-owner
+                std::lock_guard<std::mutex> lock(m_queues[target_idx]->push_mutex);
+                pushed = m_queues[target_idx]->queue.push(std::move(task));
+            }
+
+            if (!pushed) {
+                // Queue full, spill to central overflow queue
+                std::lock_guard<std::mutex> lock(m_overflow_mutex);
+                m_overflow_queue.push_back(std::move(task));
             }
             m_cv_work.notify_one();
         }
@@ -194,26 +209,24 @@ namespace Plexus {
         }
 
         void reserve_task_capacity(size_t capacity) {
-            if (m_queues.empty())
-                return;
-            size_t per_queue = (capacity + m_queues.size() - 1) / m_queues.size();
-            // Add some slack for uneven distribution
-            per_queue += 32;
-
-            for (auto &q : m_queues) {
-                std::lock_guard<std::mutex> lock(q->mutex);
-                q->queue.resize(per_queue);
-            }
+            // WorkStealingQueue has fixed capacity, no-op
+            (void)capacity;
         }
 
     private:
         struct alignas(64) WorkQueue {
-            std::mutex mutex;
-            RingBuffer<Task> queue;
+            std::mutex push_mutex; // Protects push() - Chase-Lev requires single-owner for push
+            WorkStealingQueue<Task> queue;
+
+            explicit WorkQueue(std::size_t capacity = 4096) : queue(capacity) {}
         };
 
         std::vector<std::unique_ptr<WorkQueue>> m_queues;
         std::vector<std::thread> m_threads;
+
+        // Central overflow queue for when worker queues are full
+        std::mutex m_overflow_mutex;
+        std::deque<Task> m_overflow_queue;
 
         // Global synchronization for completion and stopping
         std::mutex m_mutex;
@@ -227,133 +240,66 @@ namespace Plexus {
             t_worker_index = index;
             const size_t queue_count = m_queues.size();
 
-            // Buffer for stolen tasks
-            std::vector<Task> stolen_batch;
-            stolen_batch.reserve(16);
-
             while (true) {
-                Task task;
-                bool found_task = false;
-
-                // 0. Process stolen batch first
-                if (!stolen_batch.empty()) {
-                    task = std::move(stolen_batch.back());
-                    stolen_batch.pop_back();
-                    found_task = true;
-                }
+                std::optional<Task> task_opt;
 
                 // 1. Try local queue (LIFO for cache locality)
-                if (!found_task) {
-                    std::lock_guard<std::mutex> lock(m_queues[index]->mutex);
-                    if (m_queues[index]->queue.pop_back(task)) {
+                // Lock required because push and pop must not race
+                {
+                    std::lock_guard<std::mutex> lock(m_queues[index]->push_mutex);
+                    task_opt = m_queues[index]->queue.pop();
+                }
+                if (task_opt.has_value()) {
+                    m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
+                } else {
+                    // 2. Steal from other worker queues
+                    for (size_t i = 0; !task_opt.has_value() && i < queue_count - 1; ++i) {
+                        size_t steal_idx = (index + i + 1) % queue_count;
+                        // Lock the queue we're stealing from
+                        std::lock_guard<std::mutex> lock(m_queues[steal_idx]->push_mutex);
+                        task_opt = m_queues[steal_idx]->queue.steal();
+                        if (task_opt.has_value()) {
+                            m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
+                        }
+                    }
+                }
+
+                // 3. Try central overflow queue if we still don't have a task
+                if (!task_opt.has_value()) {
+                    std::unique_lock<std::mutex> lock(m_overflow_mutex, std::try_to_lock);
+                    if (lock && !m_overflow_queue.empty()) {
+                        task_opt = std::move(m_overflow_queue.front());
+                        m_overflow_queue.pop_front();
                         m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
-                        found_task = true;
                     }
                 }
 
-                // 2. Steal from others
-                if (!found_task && queue_count > 1) {
-                    // Xorshift32 for fast thread-local random numbers
-                    static thread_local uint32_t rng_state =
-                        std::hash<std::thread::id>{}(std::this_thread::get_id());
-                    rng_state ^= rng_state << 13;
-                    rng_state ^= rng_state >> 17;
-                    rng_state ^= rng_state << 5;
+                // 5. Wait for work
+                if (!task_opt.has_value()) {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    m_cv_work.wait(lock, [this]() {
+                        return m_stop.load(std::memory_order_relaxed) ||
+                               m_queued_tasks.load(std::memory_order_relaxed) > 0;
+                    });
 
-                    // Random start offset to prevent convoy effects
-                    // We want an offset in [1, queue_count - 1]
-                    size_t start_offset = (rng_state % (queue_count - 1)) + 1;
+                    if (m_stop.load(std::memory_order_relaxed))
+                        return;
 
-                    for (size_t i = 0; i < queue_count - 1; ++i) {
-                        // Ensure we iterate through all OTHER queues exactly once
-                        // shift ranges from 1 to queue_count-1
-                        size_t shift = ((start_offset + i - 1) % (queue_count - 1)) + 1;
-                        size_t steal_idx = (index + shift) % queue_count;
-
-                        if (std::unique_lock<std::mutex> lock(m_queues[steal_idx]->mutex,
-                                                              std::try_to_lock);
-                            lock) {
-                            if (!m_queues[steal_idx]->queue.empty()) {
-                                // Steal up to 16 tasks
-                                size_t count =
-                                    m_queues[steal_idx]->queue.pop_batch(stolen_batch, 16);
-                                if (count > 0) {
-                                    m_queued_tasks.fetch_sub(count, std::memory_order_relaxed);
-                                    task = std::move(stolen_batch.back());
-                                    stolen_batch.pop_back();
-                                    found_task = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    continue;
                 }
 
-                if (!found_task) {
-                    // 3. Spin-Wait: Try other queues before blocking
-                    // Instead of checking our own queue 64 times, check all queues a few times
-                    const int spin_iterations = queue_count > 1 ? 8 : 16;
-                    for (int spin = 0; spin < spin_iterations && !found_task; ++spin) {
-                        // Check local queue first
-                        {
-                            std::lock_guard<std::mutex> lock(m_queues[index]->mutex);
-                            if (m_queues[index]->queue.pop_back(task)) {
-                                m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
-                                found_task = true;
-                                break;
-                            }
-                        }
-
-                        // Then check other queues if we have multiple
-                        if (!found_task && queue_count > 1) {
-                            for (size_t i = 1; i < queue_count && !found_task; ++i) {
-                                size_t steal_idx = (index + i) % queue_count;
-                                if (std::unique_lock<std::mutex> lock(m_queues[steal_idx]->mutex,
-                                                                      std::try_to_lock);
-                                    lock) {
-                                    if (m_queues[steal_idx]->queue.pop(task)) {
-                                        m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
-                                        found_task = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if (!found_task) {
-                            std::this_thread::yield();
-                        }
-                    }
-
-                    // 4. Wait
-                    if (!found_task) {
-                        std::unique_lock<std::mutex> lock(m_mutex);
-                        m_cv_work.wait(lock, [this]() {
-                            return m_stop.load(std::memory_order_relaxed) ||
-                                   m_queued_tasks.load(std::memory_order_relaxed) > 0;
-                        });
-
-                        if (m_stop.load(std::memory_order_relaxed))
-                            return;
-
-                        continue;
-                    }
+                // Execute task (we know task_opt.has_value() is true here)
+                assert(task_opt.has_value() && "task_opt must have value before execution");
+                try {
+                    (*task_opt)();
+                } catch (...) {
+                    // Task threw
                 }
 
-                // Execute Task
-                if (found_task) {
-                    try {
-                        task();
-                    } catch (...) {
-                        // Task threw
-                    }
-
-                    // Simple unbatched atomic update
-                    int prev = m_active_tasks.fetch_sub(1, std::memory_order_release);
-                    if (prev == 1) {
-                        std::lock_guard<std::mutex> lock(m_mutex);
-                        m_cv_done.notify_all();
-                    }
+                int prev = m_active_tasks.fetch_sub(1, std::memory_order_release);
+                if (prev == 1) {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_cv_done.notify_all();
                 }
             }
         }
