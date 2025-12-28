@@ -155,7 +155,18 @@ namespace Plexus {
                     m_overflow_queue.push_back(std::move(task));
                 }
             }
-            m_cv_work.notify_all();
+            // Smart wake-up: only wake enough workers to handle the tasks
+            int sleeping = m_sleeping_workers.load(std::memory_order_relaxed);
+            int to_wake = std::min(static_cast<int>(tasks.size()), sleeping);
+            if (to_wake >= sleeping / 2 || to_wake > 4) {
+                // Wake many workers - use notify_all() to avoid loop overhead
+                m_cv_work.notify_all();
+            } else {
+                // Wake few workers - use targeted notify_one()
+                for (int i = 0; i < to_wake; ++i) {
+                    m_cv_work.notify_one();
+                }
+            }
         }
 
         template <typename F> void enqueue(F &&f) {
@@ -214,6 +225,7 @@ namespace Plexus {
         std::atomic<bool> m_stop{false};
         std::atomic<int> m_active_tasks{0};
         std::atomic<int> m_queued_tasks{0};
+        std::atomic<int> m_sleeping_workers{0}; // Track workers waiting on CV
 
         void worker_thread(int index) {
             t_worker_index = index;
@@ -279,10 +291,12 @@ namespace Plexus {
                 // 5. Wait for work (blocking)
                 if (!task_opt.has_value()) {
                     std::unique_lock<std::mutex> lock(m_mutex);
+                    m_sleeping_workers.fetch_add(1, std::memory_order_relaxed);
                     m_cv_work.wait(lock, [this]() {
                         return m_stop.load(std::memory_order_relaxed) ||
                                m_queued_tasks.load(std::memory_order_relaxed) > 0;
                     });
+                    m_sleeping_workers.fetch_sub(1, std::memory_order_relaxed);
 
                     if (m_stop.load(std::memory_order_relaxed))
                         return;
