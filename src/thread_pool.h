@@ -257,11 +257,25 @@ namespace Plexus {
                 }
 
                 // 3. Try central overflow queue if we still don't have a task
+                // Batch-grab: take half of available tasks to reduce contention and enable stealing
                 if (!task_opt.has_value()) {
                     std::unique_lock<std::mutex> lock(m_overflow_mutex, std::try_to_lock);
                     if (lock && !m_overflow_queue.empty()) {
+                        // Take one task for immediate execution
                         task_opt = std::move(m_overflow_queue.front());
                         m_overflow_queue.pop_front();
+
+                        // Batch-grab: take up to half of remaining tasks for local queue
+                        // Cap at a reasonable maximum to avoid one worker hoarding everything
+                        size_t remaining = m_overflow_queue.size();
+                        size_t to_grab = std::min(remaining / 2, size_t{64});
+
+                        for (size_t i = 0; i < to_grab; ++i) {
+                            if (!m_queues[index]->queue.push(std::move(m_overflow_queue.front()))) {
+                                break; // Local queue full
+                            }
+                            m_overflow_queue.pop_front();
+                        }
                     }
                 }
 
@@ -275,12 +289,23 @@ namespace Plexus {
                             break;
                         }
 
-                        // Quick check overflow queue
+                        // Quick check overflow queue with batch-grab
                         {
                             std::unique_lock<std::mutex> lock(m_overflow_mutex, std::try_to_lock);
                             if (lock && !m_overflow_queue.empty()) {
                                 task_opt = std::move(m_overflow_queue.front());
                                 m_overflow_queue.pop_front();
+
+                                // Batch-grab remaining tasks
+                                size_t remaining = m_overflow_queue.size();
+                                size_t to_grab = std::min(remaining / 2, size_t{64});
+                                for (size_t i = 0; i < to_grab; ++i) {
+                                    if (!m_queues[index]->queue.push(
+                                            std::move(m_overflow_queue.front()))) {
+                                        break;
+                                    }
+                                    m_overflow_queue.pop_front();
+                                }
                                 break;
                             }
                         }
