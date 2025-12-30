@@ -2,6 +2,7 @@
 #include "plexus/execution_graph.h"
 #include <atomic>
 #include <condition_variable>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -16,6 +17,46 @@ namespace Plexus {
     enum class ExecutionMode {
         Parallel,  ///< Use thread pool for parallel execution (default)
         Sequential ///< Run all tasks on the calling thread (for debugging)
+    };
+
+    /**
+     * @brief Handle for asynchronous graph execution.
+     *
+     * Returned by Executor::run_async(). Use wait() to block until completion,
+     * or is_done() to poll the execution status.
+     */
+    class AsyncHandle {
+    public:
+        AsyncHandle(AsyncHandle &&) = default;
+        AsyncHandle &operator=(AsyncHandle &&) = default;
+        AsyncHandle(const AsyncHandle &) = delete;
+        AsyncHandle &operator=(const AsyncHandle &) = delete;
+
+        /**
+         * @brief Blocks until the graph execution completes.
+         * @throws Re-throws any exception that occurred during execution.
+         */
+        void wait();
+
+        /**
+         * @brief Checks if the graph execution has completed.
+         * @return true if execution is done, false otherwise.
+         */
+        bool is_done() const;
+
+        /**
+         * @brief Gets any exceptions that occurred during execution.
+         * @return Vector of exception pointers. Empty if no exceptions occurred.
+         * @note Only valid after wait() returns or is_done() returns true.
+         */
+        const std::vector<std::exception_ptr> &get_exceptions() const;
+
+    private:
+        friend class Executor;
+        struct State;
+        std::shared_ptr<State> m_state;
+
+        explicit AsyncHandle(std::shared_ptr<State> state);
     };
 
     /**
@@ -55,6 +96,25 @@ namespace Plexus {
         void run(const ExecutionGraph &graph, ExecutionMode mode = ExecutionMode::Parallel);
 
         /**
+         * @brief Executes the given graph asynchronously.
+         *
+         * Returns immediately with a handle that can be used to wait for completion
+         * or poll the execution status.
+         *
+         * @param graph The dependency graph to execute.
+         * @param mode Execution mode. Use Sequential for single-threaded debugging.
+         * @return An AsyncHandle that can be used to wait for completion.
+         *
+         * @note The graph must remain valid until the execution completes.
+         * @note If any node has ThreadAffinity::Main, this function will block
+         *       until all main-thread tasks complete, as they must run on the
+         *       calling thread. For truly async execution, ensure no nodes have
+         *       main-thread affinity.
+         */
+        [[nodiscard]] AsyncHandle run_async(const ExecutionGraph &graph,
+                                            ExecutionMode mode = ExecutionMode::Parallel);
+
+        /**
          * @brief Callback for profiling.
          * @param name Optional label.
          * @param duration_ms Duration in milliseconds.
@@ -66,29 +126,15 @@ namespace Plexus {
         }
 
     private:
-        void run_task(const ExecutionGraph &graph, std::atomic<int> *counters, int node_idx);
-        void run_sequential(const ExecutionGraph &graph);
+        void run_task(const ExecutionGraph &graph, std::atomic<int> *counters, int node_idx,
+                      std::shared_ptr<AsyncHandle::State> async_state);
+        void run_sequential(const ExecutionGraph &graph,
+                            std::shared_ptr<AsyncHandle::State> async_state);
+        void run_parallel(const ExecutionGraph &graph,
+                          std::shared_ptr<AsyncHandle::State> async_state);
 
         std::unique_ptr<ThreadPool> m_owned_pool;
         ThreadPool *m_pool;
         ProfilerCallback m_profiler_callback;
-
-        // Error Handling
-        std::atomic<bool> m_cancel_graph_execution{false};
-        std::mutex m_exception_mutex;
-        std::vector<std::exception_ptr> m_exceptions;
-
-        // Zero-Allocation Cache
-        std::unique_ptr<std::atomic<int>[]> m_counter_cache;
-        size_t m_counter_cache_size = 0;
-
-        // Thread Affinity Support
-        void process_main_thread_tasks();
-        std::vector<int> m_main_thread_queue;
-        std::mutex m_main_queue_mutex;
-        std::vector<int> m_main_queue_backlog; // Incoming tasks for main thread
-
-        std::atomic<int> m_active_task_count{0};
-        std::condition_variable m_cv_main_thread; // To wake up main thread
     };
 }
