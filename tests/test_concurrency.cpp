@@ -19,12 +19,6 @@ void execute_graph_test(Plexus::ThreadPool &pool, const Plexus::ExecutionGraph &
 
     std::atomic<int> *counters_ptr = counters.get();
 
-    // We use a fix-point style lambda for recursion
-    // Since we can't easily capture local lambda by itself, we use a std::function
-    // or just a strict Y-comb equivalent. For simplicity in test: std::function.
-    // Note: capturing std::function by reference is dangerous if it goes out of scope,
-    // but here we wait() at the end, so stack is valid.
-
     std::function<void(int)> run_recursive;
     run_recursive = [&](int node_idx) {
         if (graph.nodes[node_idx].work) {
@@ -59,21 +53,26 @@ TEST(ConcurrencyTest, RunGraph) {
     const int num_readers = 100;
 
     // Node: Writer (Runs first)
-    builder.add_node({"Writer", [&]() { counter = 1000; }, {{res_id, Plexus::Access::WRITE}}});
+    builder.add_node({.debug_name = "Writer",
+                      .work_function = [&]() { counter = 1000; },
+                      .dependencies = {{res_id, Plexus::Access::WRITE}}});
 
     // Nodes: Readers (Run parallel after Writer)
     for (int i = 0; i < num_readers; ++i) {
-        builder.add_node({"Reader",
-                          [&]() {
-                              if (counter == 1000) {
-                                  nodes_read_correct_value++;
-                              }
-                          },
-                          {{res_id, Plexus::Access::READ}}});
+        builder.add_node({.debug_name = "Reader",
+                          .work_function =
+                              [&]() {
+                                  if (counter == 1000) {
+                                      nodes_read_correct_value++;
+                                  }
+                              },
+                          .dependencies = {{res_id, Plexus::Access::READ}}});
     }
 
     // Node: Final Writer (Runs after all Readers)
-    builder.add_node({"Finalizer", [&]() { counter = 2000; }, {{res_id, Plexus::Access::WRITE}}});
+    builder.add_node({.debug_name = "Finalizer",
+                      .work_function = [&]() { counter = 2000; },
+                      .dependencies = {{res_id, Plexus::Access::WRITE}}});
 
     auto graph = builder.bake();
     Plexus::ThreadPool pool;
@@ -195,18 +194,23 @@ TEST(ConcurrencyTest, WriteAfterRead) {
     bool write_saw_all_reads = false;
 
     // 2 Readers
-    builder.add_node({"Reader1", [&]() { read_count++; }, {{res_id, Plexus::Access::READ}}});
-    builder.add_node({"Reader2", [&]() { read_count++; }, {{res_id, Plexus::Access::READ}}});
+    builder.add_node({.debug_name = "Reader1",
+                      .work_function = [&]() { read_count++; },
+                      .dependencies = {{res_id, Plexus::Access::READ}}});
+    builder.add_node({.debug_name = "Reader2",
+                      .work_function = [&]() { read_count++; },
+                      .dependencies = {{res_id, Plexus::Access::READ}}});
 
     // 1 Writer (must run AFTER readers)
-    builder.add_node({"Writer",
-                      [&]() {
-                          write_happened = true;
-                          if (read_count == 2) {
-                              write_saw_all_reads = true;
-                          }
-                      },
-                      {{res_id, Plexus::Access::WRITE}}});
+    builder.add_node({.debug_name = "Writer",
+                      .work_function =
+                          [&]() {
+                              write_happened = true;
+                              if (read_count == 2) {
+                                  write_saw_all_reads = true;
+                              }
+                          },
+                      .dependencies = {{res_id, Plexus::Access::WRITE}}});
 
     auto graph = builder.bake();
     Plexus::ThreadPool pool;

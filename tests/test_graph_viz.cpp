@@ -12,9 +12,9 @@ TEST(GraphVizTest, DebugDump) {
     //      v
     //      C
 
-    auto a = builder.add_node({"NodeA", []() {}, {}, {}, {}, 10});
-    auto b = builder.add_node({"NodeB", []() {}, {}, {a}, {}, 5});
-    auto c = builder.add_node({"NodeC", []() {}, {}, {b}, {}, 0});
+    auto a = builder.add_node({.debug_name = "NodeA", .priority = 10});
+    auto b = builder.add_node({.debug_name = "NodeB", .run_after = {a}, .priority = 5});
+    auto c = builder.add_node({.debug_name = "NodeC", .run_after = {b}});
 
     auto graph = builder.bake();
 

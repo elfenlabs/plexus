@@ -68,16 +68,16 @@ void example() {
 
     // Create a node that writes to BufferA
     builder.add_node({
-        "Writer",
-        []() { std::cout << "Writing...\n"; },
-        {{buffer_id, Plexus::Access::WRITE}}
+        .debug_name = "Writer",
+        .work_function = []() { std::cout << "Writing...\n"; },
+        .dependencies = {{buffer_id, Plexus::Access::WRITE}}
     });
 
     // Create a node that reads from BufferA
     builder.add_node({
-        "Reader",
-        []() { std::cout << "Reading...\n"; },
-        {{buffer_id, Plexus::Access::READ}}
+        .debug_name = "Reader",
+        .work_function = []() { std::cout << "Reading...\n"; },
+        .dependencies = {{buffer_id, Plexus::Access::READ}}
     });
 
     // Bake the graph

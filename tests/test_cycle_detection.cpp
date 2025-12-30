@@ -11,11 +11,13 @@ TEST(CycleDetectionTest, SimpleCycle) {
 
     // Node 1: Reads A, Writes B
     builder.add_node(
-        {"Node1", []() {}, {{res_a, Plexus::Access::READ}, {res_b, Plexus::Access::WRITE}}});
+        {.debug_name = "Node1",
+         .dependencies = {{res_a, Plexus::Access::READ}, {res_b, Plexus::Access::WRITE}}});
 
     // Node 2: Reads B, Writes A
     builder.add_node(
-        {"Node2", []() {}, {{res_b, Plexus::Access::READ}, {res_a, Plexus::Access::WRITE}}});
+        {.debug_name = "Node2",
+         .dependencies = {{res_b, Plexus::Access::READ}, {res_a, Plexus::Access::WRITE}}});
 
     // In the current implementation, dependencies are resolved linearly based on registration
     // order. Node 1 (Registered First) Write B -> Node 2 Read B (Implies Node 1 -> Node 2) Node 2
@@ -35,7 +37,8 @@ TEST(CycleDetectionTest, SelfCycle) {
     // Node reads and writes same resource (Modify).
     // Should depend on previous writer, not itself.
     builder.add_node(
-        {"Selfie", []() {}, {{res_a, Plexus::Access::READ}, {res_a, Plexus::Access::WRITE}}});
+        {.debug_name = "Selfie",
+         .dependencies = {{res_a, Plexus::Access::READ}, {res_a, Plexus::Access::WRITE}}});
 
     EXPECT_NO_THROW(builder.bake());
 }

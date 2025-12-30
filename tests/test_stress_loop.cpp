@@ -20,36 +20,27 @@ TEST(StressLoopTest, DescendantBiasedLoop) {
         std::vector<int> light_root_tickets(NUM_TREES, 0);
 
         for (int i = 0; i < NUM_TREES; ++i) {
-            auto heavy_root = builder.add_node(
-                {"HeavyRoot_" + std::to_string(i), [i, &heavy_root_tickets, &ticket]() {
-                     heavy_root_tickets[i] = ticket.fetch_add(1);
-                     // std::this_thread::yield();
-                     // Removed yield to make it tighter/faster and maybe simpler
-                 }});
+            auto heavy_root =
+                builder.add_node({.debug_name = "HeavyRoot_" + std::to_string(i),
+                                  .work_function = [i, &heavy_root_tickets, &ticket]() {
+                                      heavy_root_tickets[i] = ticket.fetch_add(1);
+                                  }});
 
             for (int c = 0; c < 20; ++c) {
-                builder.add_node({"Child", []() {}, {}, {heavy_root}});
+                builder.add_node({.debug_name = "Child", .run_after = {heavy_root}});
             }
 
-            builder.add_node(
-                {"LightRoot_" + std::to_string(i), [i, &light_root_tickets, &ticket]() {
-                     light_root_tickets[i] = ticket.fetch_add(1);
-                 }});
+            builder.add_node({.debug_name = "LightRoot_" + std::to_string(i),
+                              .work_function = [i, &light_root_tickets, &ticket]() {
+                                  light_root_tickets[i] = ticket.fetch_add(1);
+                              }});
         }
 
         auto graph = builder.bake();
 
-        // Timeout protection for the test runner?
-        // We can't easily timeout inside the test unless we use async + future wait_for
-        // But if it hangs, ctest will catch it (eventually) or we see it in output.
-        // Let's print progress.
         if (run % 100 == 0) {
             std::cout << "Run " << run << std::endl;
         }
-
-        // if (run == 0) {
-        //     graph.dump_debug(std::cout);
-        // }
 
         executor.run(graph);
     }
