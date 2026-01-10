@@ -44,6 +44,7 @@ add_executable(plexusTests
     tests/test_affinity.cpp
     tests/test_stress_loop.cpp
     tests/test_node_groups.cpp
+    tests/test_resource.cpp
 )
 target_link_libraries(plexusTests PRIVATE plexusCore gtest_main)
 target_include_directories(plexusTests PRIVATE src)
