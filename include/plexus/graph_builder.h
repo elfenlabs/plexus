@@ -50,7 +50,7 @@ namespace Plexus {
          * Resource<std::vector<int>> bufA(ctx, "A");
          * Resource<int> counter(ctx, "Counter");
          *
-         * builder.add_typed_node(
+         * builder.add_node(
          *     "Process",
          *     [](const std::vector<int>& a, int& cnt) { cnt = a.size(); },
          *     Read(bufA),
@@ -66,12 +66,19 @@ namespace Plexus {
          * @return NodeID The unique ID of the registered node.
          */
         template <typename Func, typename... Accesses>
-        NodeID add_typed_node(const std::string &name, Func &&work, Accesses &&...accesses) {
+        NodeID add_node(const std::string &name, Func &&work, Accesses &&...accesses) {
             return add_node({.debug_name = name,
                              .work_function = [work = std::forward<Func>(work),
                                                ... acc = std::forward<Accesses>(
                                                    accesses)]() mutable { work(acc.get()...); },
                              .dependencies = {accesses.dependency()...}});
+        }
+
+        /// @deprecated Use add_node() instead.
+        template <typename Func, typename... Accesses>
+        [[deprecated("Use add_node() instead")]]
+        NodeID add_typed_node(const std::string &name, Func &&work, Accesses &&...accesses) {
+            return add_node(name, std::forward<Func>(work), std::forward<Accesses>(accesses)...);
         }
 
         /**
@@ -88,7 +95,7 @@ namespace Plexus {
          * Resource<std::vector<int>> bufA(ctx, "A");
          * Resource<int> counter(ctx, "Counter");
          *
-         * builder.add_auto_node(
+         * builder.add_node(
          *     "Process",
          *     [](const std::vector<int>& a, int& cnt) { cnt = a.size(); },
          *     bufA,     // Inferred: READ (const&)
@@ -104,14 +111,21 @@ namespace Plexus {
          * @return NodeID The unique ID of the registered node.
          */
         template <typename Func, typename... ResourceTypes>
-        NodeID add_auto_node(const std::string &name, Func &&work,
-                             Resource<ResourceTypes> &...resources) {
+        NodeID add_node(const std::string &name, Func &&work,
+                        Resource<ResourceTypes> &...resources) {
             static_assert(detail::function_traits<Func>::arity == sizeof...(ResourceTypes),
                           "Function parameter count must match resource count");
 
-            return add_auto_node_impl<Func>(name, std::forward<Func>(work),
-                                            std::index_sequence_for<ResourceTypes...>{},
-                                            resources...);
+            return add_node_impl<Func>(name, std::forward<Func>(work),
+                                       std::index_sequence_for<ResourceTypes...>{}, resources...);
+        }
+
+        /// @deprecated Use add_node() instead.
+        template <typename Func, typename... ResourceTypes>
+        [[deprecated("Use add_node() instead")]]
+        NodeID add_auto_node(const std::string &name, Func &&work,
+                             Resource<ResourceTypes> &...resources) {
+            return add_node(name, std::forward<Func>(work), resources...);
         }
 
         /**
@@ -132,9 +146,8 @@ namespace Plexus {
 
         // Implementation helper that uses index sequence for proper expansion
         template <typename Func, std::size_t... Indices, typename... ResourceTypes>
-        NodeID add_auto_node_impl(const std::string &name, Func &&work,
-                                  std::index_sequence<Indices...>,
-                                  Resource<ResourceTypes> &...resources) {
+        NodeID add_node_impl(const std::string &name, Func &&work, std::index_sequence<Indices...>,
+                             Resource<ResourceTypes> &...resources) {
             // Validate that each Resource<T> matches the function's parameter type
             (detail::check_resource_type_match<Indices, Func, ResourceTypes>(), ...);
 

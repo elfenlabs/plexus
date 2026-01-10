@@ -38,9 +38,8 @@ TEST(ResourceTest, AutoInferenceRead) {
     GraphBuilder builder(ctx);
 
     int observed_size = 0;
-    builder.add_auto_node(
-        "Reader",
-        [&observed_size](const std::vector<int>& buf) { observed_size = buf.size(); },
+    builder.add_node(
+        "Reader", [&observed_size](const std::vector<int> &buf) { observed_size = buf.size(); },
         buffer // Inferred: READ (const&)
     );
 
@@ -58,8 +57,8 @@ TEST(ResourceTest, AutoInferenceWrite) {
 
     GraphBuilder builder(ctx);
 
-    builder.add_auto_node(
-        "Writer", [](int& count) { count = 42; }, counter // Inferred: WRITE (&)
+    builder.add_node(
+        "Writer", [](int &count) { count = 42; }, counter // Inferred: WRITE (&)
     );
 
     auto graph = builder.bake();
@@ -81,11 +80,11 @@ TEST(ResourceTest, AutoInferenceMixedAccess) {
 
     GraphBuilder builder(ctx);
 
-    builder.add_auto_node(
+    builder.add_node(
         "CountElements",
-        [](const std::vector<int>& a, // READ
-           const std::vector<int>& b, // READ
-           int& count) {              // WRITE
+        [](const std::vector<int> &a, // READ
+           const std::vector<int> &b, // READ
+           int &count) {              // WRITE
             count = a.size() + b.size();
         },
         bufA,   // Inferred: READ
@@ -110,9 +109,8 @@ TEST(ResourceTest, ExplicitTags) {
 
     GraphBuilder builder(ctx);
 
-    builder.add_typed_node(
-        "Process",
-        [](const std::vector<int>& buf, int& cnt) { cnt = buf.size(); },
+    builder.add_node(
+        "Process", [](const std::vector<int> &buf, int &cnt) { cnt = buf.size(); },
         Read(buffer),  // Explicit READ
         Write(counter) // Explicit WRITE
     );
@@ -132,15 +130,14 @@ TEST(ResourceTest, AutoInferenceDependencyOrdering) {
     GraphBuilder builder(ctx);
 
     // Writer runs first
-    builder.add_auto_node(
-        "Writer", [](int& val) { val = 100; }, value // WRITE
+    builder.add_node(
+        "Writer", [](int &val) { val = 100; }, value // WRITE
     );
 
     // Reader runs after writer
     int observed_value = 0;
-    builder.add_auto_node(
-        "Reader",
-        [&observed_value](const int& val) { observed_value = val; },
+    builder.add_node(
+        "Reader", [&observed_value](const int &val) { observed_value = val; },
         value // READ
     );
 
@@ -158,12 +155,9 @@ TEST(ResourceTest, AutoInferenceMultipleWriters) {
 
     GraphBuilder builder(ctx);
 
-    builder.add_auto_node(
-        "Increment1", [](int& cnt) { cnt += 10; }, counter);
-    builder.add_auto_node(
-        "Increment2", [](int& cnt) { cnt += 20; }, counter);
-    builder.add_auto_node(
-        "Increment3", [](int& cnt) { cnt += 30; }, counter);
+    builder.add_node("Increment1", [](int &cnt) { cnt += 10; }, counter);
+    builder.add_node("Increment2", [](int &cnt) { cnt += 20; }, counter);
+    builder.add_node("Increment3", [](int &cnt) { cnt += 30; }, counter);
 
     auto graph = builder.bake();
     Executor executor;
@@ -180,17 +174,16 @@ TEST(ResourceTest, AutoInferenceParallelReaders) {
     GraphBuilder builder(ctx);
 
     // Writer sets the value
-    builder.add_auto_node(
-        "Writer", [](int& val) { val = 100; }, value);
+    builder.add_node("Writer", [](int &val) { val = 100; }, value);
 
     // Multiple readers can run in parallel
     std::atomic<int> read_count{0};
     std::atomic<int> correct_reads{0};
 
     for (int i = 0; i < 10; ++i) {
-        builder.add_auto_node(
+        builder.add_node(
             "Reader",
-            [&read_count, &correct_reads](const int& val) {
+            [&read_count, &correct_reads](const int &val) {
                 read_count++;
                 if (val == 100) {
                     correct_reads++;
@@ -238,23 +231,23 @@ TEST(ResourceTest, ComplexGraphAutoInference) {
     GraphBuilder builder(ctx);
 
     // Node 1: Filter even numbers
-    builder.add_auto_node(
+    builder.add_node(
         "Filter",
-        [](const std::vector<int>& in, std::vector<int>& out) {
+        [](const std::vector<int> &in, std::vector<int> &out) {
             for (int val : in) {
                 if (val % 2 == 0) {
                     out.push_back(val);
                 }
             }
         },
-        input,    // READ
-        filtered  // WRITE
+        input,   // READ
+        filtered // WRITE
     );
 
     // Node 2: Sum filtered values
-    builder.add_auto_node(
+    builder.add_node(
         "Sum",
-        [](const std::vector<int>& filt, int& total) {
+        [](const std::vector<int> &filt, int &total) {
             for (int val : filt) {
                 total += val;
             }
@@ -268,4 +261,66 @@ TEST(ResourceTest, ComplexGraphAutoInference) {
     executor.run(graph);
 
     EXPECT_EQ(sum.get(), 2 + 4 + 6 + 8 + 10); // 30
+}
+
+// Test unified add_node with auto-inference (previously add_auto_node)
+TEST(ResourceTest, UnifiedAPI_AutoInference) {
+    Context ctx;
+    Resource<int> value(ctx, "Value", 0);
+
+    GraphBuilder builder(ctx);
+
+    // Unified add_node with Resource<T>& triggers auto-inference
+    builder.add_node("Writer", [](int &val) { val = 123; }, value);
+
+    auto graph = builder.bake();
+    Executor executor;
+    executor.run(graph);
+
+    EXPECT_EQ(value.get(), 123);
+}
+
+// Test unified add_node with explicit tags (previously add_typed_node)
+TEST(ResourceTest, UnifiedAPI_ExplicitTags) {
+    Context ctx;
+    Resource<int> input(ctx, "Input", 10);
+    Resource<int> output(ctx, "Output", 0);
+
+    GraphBuilder builder(ctx);
+
+    // Unified add_node with Read()/Write() triggers explicit access
+    builder.add_node(
+        "Double", [](const int &in, int &out) { out = in * 2; }, Read(input), Write(output));
+
+    auto graph = builder.bake();
+    Executor executor;
+    executor.run(graph);
+
+    EXPECT_EQ(output.get(), 20);
+}
+
+// Test that deprecated aliases still work (backward compatibility)
+TEST(ResourceTest, DeprecatedAliases) {
+    Context ctx;
+    Resource<int> counter(ctx, "Counter", 0);
+
+    GraphBuilder builder(ctx);
+
+// Suppress deprecation warnings for this test
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
+    // Old add_auto_node should still compile and work
+    builder.add_auto_node("Increment", [](int &cnt) { cnt += 5; }, counter);
+
+    // Old add_typed_node should still compile and work
+    builder.add_typed_node("Double", [](int &cnt) { cnt *= 2; }, Write(counter));
+
+#pragma GCC diagnostic pop
+
+    auto graph = builder.bake();
+    Executor executor;
+    executor.run(graph);
+
+    EXPECT_EQ(counter.get(), 10); // (0 + 5) * 2 = 10
 }

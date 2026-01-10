@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **API Unification**: `add_auto_node()` and `add_typed_node()` are now unified as overloads of `add_node()`
+  - `add_node(name, func, Resource<T>&...)` — auto-infers access from `const T&` vs `T&`
+  - `add_node(name, func, Read()|Write()...)` — explicit access tags
+- `add_auto_node()` and `add_typed_node()` are deprecated but remain as backward-compatible aliases
+
 ## [0.1.0] - 2026-01-10
 
 ### Added

@@ -120,13 +120,13 @@ buffer.get_mut().push_back(4);        // Mutable access
 ```
 
 ### Automatic Dependency Inference
-The `add_auto_node` method infers dependencies from your lambda's parameter types:
+The `add_node` method can infer dependencies from your lambda's parameter types:
 
 ```cpp
 Plexus::Resource<std::vector<int>> input(ctx, "Input", {1, 2, 3});
 Plexus::Resource<int> output(ctx, "Output", 0);
 
-builder.add_auto_node(
+builder.add_node(
     "ProcessData",
     [](const std::vector<int>& in, int& out) {  // const& = READ, & = WRITE
         out = in.size();
@@ -142,10 +142,10 @@ builder.add_auto_node(
 - `T` (by value): Inferred as `Access::WRITE`
 
 ### Explicit Tagged Access
-For explicit control, use `add_typed_node` with `Read()` and `Write()` helpers:
+For explicit control, use `add_node` with `Read()` and `Write()` helpers:
 
 ```cpp
-builder.add_typed_node(
+builder.add_node(
     "ExplicitTask",
     [](const std::vector<int>& in, int& out) { /* ... */ },
     Read(input),
