@@ -11,6 +11,17 @@
 
 namespace Plexus {
 
+    /**
+     * Lock-free work-stealing deque based on the Chase-Lev algorithm.
+     *
+     * Implementation follows "Correct and Efficient Work-Stealing for Weak
+     * Memory Models" (Lê et al., PPoPP 2013) for memory ordering.
+     *
+     * - Owner thread: push() and pop() from the "bottom" (LIFO)
+     * - Thief threads: steal() from the "top" (FIFO)
+     *
+     * Uses atomic<T*> for buffer elements to ensure thread-safe access.
+     */
     template <typename T> class WorkStealingQueue {
     public:
         explicit WorkStealingQueue(std::size_t capacity = 4096)
@@ -21,6 +32,20 @@ namespace Plexus {
 
             m_top.store(0, std::memory_order_relaxed);
             m_bottom.store(0, std::memory_order_relaxed);
+
+            for (auto &slot : m_buffer) {
+                slot.store(nullptr, std::memory_order_relaxed);
+            }
+        }
+
+        ~WorkStealingQueue() {
+            // Clean up any remaining elements
+            const int64_t b = m_bottom.load(std::memory_order_relaxed);
+            const int64_t t = m_top.load(std::memory_order_relaxed);
+            for (int64_t i = t; i < b; ++i) {
+                const std::size_t idx = static_cast<std::size_t>(i) & m_mask;
+                delete m_buffer[idx].load(std::memory_order_relaxed);
+            }
         }
 
         WorkStealingQueue(const WorkStealingQueue &) = delete;
@@ -29,18 +54,25 @@ namespace Plexus {
         std::size_t capacity() const noexcept { return m_capacity; }
 
         // Owner thread only
-        // Takes const ref to avoid consuming value on failure
         template <typename U = T> bool push(U &&value) {
             const int64_t b = m_bottom.load(std::memory_order_relaxed);
             const int64_t t = m_top.load(std::memory_order_acquire);
 
             if (b - t >= static_cast<int64_t>(m_capacity)) {
-                return false; // full - value not consumed
+                return false; // full
             }
 
-            m_buffer[static_cast<std::size_t>(b) & m_mask].emplace(std::forward<U>(value));
+            const std::size_t idx = static_cast<std::size_t>(b) & m_mask;
 
-            // Publish: the buffer write must happen-before thieves observe the new bottom.
+            // Slot should be empty (cleared by pop/steal). Debug assertion:
+            // assert(m_buffer[idx].load(std::memory_order_relaxed) == nullptr);
+
+            T *ptr = new T(std::forward<U>(value));
+
+            // Store pointer. The release on bottom below will make this visible.
+            m_buffer[idx].store(ptr, std::memory_order_relaxed);
+
+            // Publish: this release pairs with acquire in steal's buffer load.
             m_bottom.store(b + 1, std::memory_order_release);
             return true;
         }
@@ -48,84 +80,97 @@ namespace Plexus {
         // Owner thread only (LIFO)
         std::optional<T> pop() {
             int64_t b = m_bottom.load(std::memory_order_relaxed) - 1;
-            m_bottom.store(b, std::memory_order_relaxed);
 
-            // Chase–Lev requires a global order point between pop/steal.
-            std::atomic_thread_fence(std::memory_order_seq_cst);
+            // seq_cst store to synchronize with steal's operations
+            m_bottom.store(b, std::memory_order_seq_cst);
 
-            int64_t t = m_top.load(std::memory_order_relaxed);
+            int64_t t = m_top.load(std::memory_order_seq_cst);
 
             if (t > b) {
-                // Empty: restore bottom
+                // Queue was empty, restore bottom
                 m_bottom.store(b + 1, std::memory_order_relaxed);
                 return std::nullopt;
             }
 
             const std::size_t idx = static_cast<std::size_t>(b) & m_mask;
+            T *ptr;
 
             if (t == b) {
-                // Last element: must win before touching the slot (no speculative move!)
+                // Last element - race with thieves for the same slot.
+                // Use speculative exchange: extract ptr, then CAS, restore if lose.
+                ptr = m_buffer[idx].exchange(nullptr, std::memory_order_acquire);
+
                 if (!m_top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst,
                                                    std::memory_order_relaxed)) {
-                    // Thief won
+                    // A thief won - restore the ptr for them
+                    if (ptr) {
+                        m_buffer[idx].store(ptr, std::memory_order_release);
+                    }
                     m_bottom.store(b + 1, std::memory_order_relaxed);
                     return std::nullopt;
                 }
 
-                // We won: make deque empty (top == bottom)
-                m_bottom.store(b + 1, std::memory_order_relaxed);
-            }
-            // If t < b, it wasn't the last element; no one else touches idx.
+                // We won the CAS. If ptr is null, a thief extracted it but will restore it
+                // since their CAS will fail. Spin until we see the restored value.
+                while (!ptr) {
+                    ptr = m_buffer[idx].exchange(nullptr, std::memory_order_acquire);
+                }
 
-            // CRITICAL: The slot MUST have a value here. If it doesn't, there's a race condition.
-#ifndef NDEBUG
-            if (!m_buffer[idx].has_value()) {
-                // This should never happen in a correct Chase-Lev implementation
+                // Restore bottom (queue empty)
+                m_bottom.store(b + 1, std::memory_order_relaxed);
+            } else {
+                // t < b: We have exclusive access to this slot.
+                // Thieves access slot t, we access slot b (different slots).
+                ptr = m_buffer[idx].exchange(nullptr, std::memory_order_acquire);
+            }
+
+            // With the spin-wait loops above, ptr should never be null here.
+            // If it is, there's a fundamental algorithm bug.
+            if (!ptr) {
                 return std::nullopt;
             }
-#endif
 
-            std::optional<T> out;
-            out.emplace(std::move(*m_buffer[idx]));
-            m_buffer[idx].reset();
-            return out;
+            std::optional<T> result;
+            result.emplace(std::move(*ptr));
+            delete ptr;
+            return result;
         }
 
-        // Thieves (FIFO)
+        // Thief threads (FIFO)
         std::optional<T> steal() {
-            int64_t t = m_top.load(std::memory_order_acquire);
-
-            // Global order point between steal and owner's pop.
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-
-            int64_t b = m_bottom.load(std::memory_order_acquire);
+            int64_t t = m_top.load(std::memory_order_seq_cst);
+            int64_t b = m_bottom.load(std::memory_order_seq_cst);
 
             if (t >= b) {
                 return std::nullopt; // empty
             }
 
-            // Claim index t. Only the winner may touch the slot.
-            if (!m_top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst,
-                                               std::memory_order_relaxed)) {
-                return std::nullopt;
-            }
-
             const std::size_t idx = static_cast<std::size_t>(t) & m_mask;
 
-            // bottom.load(acquire) above synchronizes with push's bottom.store(release),
-            // so the buffer slot is visible here.
-            // CRITICAL: The slot MUST have a value here. If it doesn't, there's a race condition.
-#ifndef NDEBUG
-            if (!m_buffer[idx].has_value()) {
-                // This should never happen in a correct Chase-Lev implementation
+            // Speculatively extract the pointer using exchange.
+            // This atomically reads and clears the slot.
+            T *ptr = m_buffer[idx].exchange(nullptr, std::memory_order_acquire);
+
+            // Attempt to claim this slot by incrementing top
+            if (!m_top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst,
+                                               std::memory_order_relaxed)) {
+                // Lost the race - restore the pointer so winner can get it
+                if (ptr) {
+                    m_buffer[idx].store(ptr, std::memory_order_release);
+                }
                 return std::nullopt;
             }
-#endif
 
-            std::optional<T> out;
-            out.emplace(std::move(*m_buffer[idx]));
-            m_buffer[idx].reset();
-            return out;
+            // We won the CAS. If ptr is null, the owner (pop) extracted it but will restore it
+            // since their CAS will fail. Spin until we see the restored value.
+            while (!ptr) {
+                ptr = m_buffer[idx].exchange(nullptr, std::memory_order_acquire);
+            }
+
+            std::optional<T> result;
+            result.emplace(std::move(*ptr));
+            delete ptr;
+            return result;
         }
 
         // Approximate under concurrency; exact only when quiescent.
@@ -163,7 +208,7 @@ namespace Plexus {
 
         std::size_t m_capacity{0};
         std::size_t m_mask{0};
-        std::vector<std::optional<T>> m_buffer;
+        std::vector<std::atomic<T *>> m_buffer;
     };
 
 } // namespace Plexus
