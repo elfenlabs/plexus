@@ -101,6 +101,77 @@ Plexus::Executor executor(pool);
 executor.run(graph);
 ```
 
+## Typed Resources
+
+For type-safe data access, plexus provides the `Resource<T>` wrapper and automatic dependency inference.
+
+### Resource\<T\> Wrapper
+Instead of raw resource IDs, you can use typed resources that bundle data with their dependency tracking:
+
+```cpp
+#include "plexus/resource.h"
+
+Plexus::Context ctx;
+Plexus::Resource<std::vector<int>> buffer(ctx, "BufferA", {1, 2, 3});
+
+// Access data
+const auto& data = buffer.get();      // Read-only access
+buffer.get_mut().push_back(4);        // Mutable access
+```
+
+### Automatic Dependency Inference
+The `add_auto_node` method infers dependencies from your lambda's parameter types:
+
+```cpp
+Plexus::Resource<std::vector<int>> input(ctx, "Input", {1, 2, 3});
+Plexus::Resource<int> output(ctx, "Output", 0);
+
+builder.add_auto_node(
+    "ProcessData",
+    [](const std::vector<int>& in, int& out) {  // const& = READ, & = WRITE
+        out = in.size();
+    },
+    input,   // Inferred as READ
+    output   // Inferred as WRITE
+);
+```
+
+**Inference Rules:**
+- `const T&`: Inferred as `Access::READ`
+- `T&`: Inferred as `Access::WRITE`
+- `T` (by value): Inferred as `Access::WRITE`
+
+### Explicit Tagged Access
+For explicit control, use `add_typed_node` with `Read()` and `Write()` helpers:
+
+```cpp
+builder.add_typed_node(
+    "ExplicitTask",
+    [](const std::vector<int>& in, int& out) { /* ... */ },
+    Read(input),
+    Write(output)
+);
+```
+
+## Runtime Utilities
+
+plexus provides runtime utilities for querying thread pool state, useful for per-thread resource allocation.
+
+```cpp
+#include "plexus/runtime.h"
+
+// Inside a node's work_function:
+size_t my_index = Plexus::current_worker_index();  // [0, worker_count) for workers
+size_t total    = Plexus::worker_count();          // Total worker threads
+```
+
+**Return values for `current_worker_index()`:**
+| Context | Return Value |
+|---------|--------------|
+| Worker thread | `[0, worker_count)` |
+| Main thread (`ThreadAffinity::Main`) | `worker_count()` |
+| Outside Plexus execution | `SIZE_MAX` |
+
 ## Advanced Usage
 
 ### Dependency Resolution (WAW, WAR)
