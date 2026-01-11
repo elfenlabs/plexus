@@ -2,16 +2,18 @@
 
 #include <atomic>
 #include <cstddef>
-#include <functional>
+#include <mutex>
 #include <new>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace Plexus {
 
     /**
      * @brief Fixed-size, type-erased callable with small-buffer optimization.
      *
-     * Avoids heap allocation for small lambdas (up to kStorageSize bytes).
+     * Avoids heap allocation for small lambdas (up to StorageSize bytes).
      */
     template <std::size_t StorageSize = 64> class FixedFunction {
     public:
@@ -19,6 +21,8 @@ namespace Plexus {
 
         template <typename F> FixedFunction(F &&f) {
             static_assert(sizeof(F) <= StorageSize, "Task too large for FixedFunction");
+            static_assert(alignof(F) <= alignof(std::max_align_t),
+                          "Task alignment too large for FixedFunction");
             static_assert(std::is_trivially_copyable_v<F> || std::is_move_constructible_v<F>,
                           "Task must be movable");
 
@@ -26,7 +30,9 @@ namespace Plexus {
             m_invoke = [](void *storage) { (*reinterpret_cast<F *>(storage))(); };
             m_dtor = [](void *storage) { reinterpret_cast<F *>(storage)->~F(); };
             m_move = [](void *dest, void *src) {
-                new (dest) F(std::move(*reinterpret_cast<F *>(src)));
+                auto *s = reinterpret_cast<F *>(src);
+                new (dest) F(std::move(*s));
+                s->~F(); // Destroy source after move
             };
         }
 
@@ -37,21 +43,22 @@ namespace Plexus {
                 m_dtor = other.m_dtor;
                 m_move = other.m_move;
                 other.m_invoke = nullptr;
+                other.m_dtor = nullptr;
+                other.m_move = nullptr;
             }
         }
 
         FixedFunction &operator=(FixedFunction &&other) noexcept {
             if (this != &other) {
-                if (m_invoke)
-                    m_dtor(m_storage);
+                reset();
                 if (other.m_invoke) {
                     other.m_move(m_storage, other.m_storage);
                     m_invoke = other.m_invoke;
                     m_dtor = other.m_dtor;
                     m_move = other.m_move;
                     other.m_invoke = nullptr;
-                } else {
-                    m_invoke = nullptr;
+                    other.m_dtor = nullptr;
+                    other.m_move = nullptr;
                 }
             }
             return *this;
@@ -73,6 +80,8 @@ namespace Plexus {
             if (m_invoke) {
                 m_dtor(m_storage);
                 m_invoke = nullptr;
+                m_dtor = nullptr;
+                m_move = nullptr;
             }
         }
 
@@ -91,20 +100,15 @@ namespace Plexus {
      * work-stealing queue.
      */
     struct TaskNode {
-        std::atomic<TaskNode *> next{nullptr};
+        TaskNode *next{nullptr}; // For freelist (protected by mutex)
         FixedFunction<64> task;
-
-        void reset() {
-            next.store(nullptr, std::memory_order_relaxed);
-            task.reset();
-        }
     };
 
     /**
-     * @brief Lock-free pool for TaskNode allocation using Treiber stack.
+     * @brief Thread-safe pool for TaskNode allocation.
      *
-     * Provides O(1) allocation and deallocation. Nodes are never freed
-     * until pool destruction, ensuring stable lifetimes for the work-stealing queue.
+     * Uses mutex + simple freelist to avoid ABA issues inherent in lock-free
+     * Treiber stacks. Nodes are never freed until pool destruction.
      */
     class TaskNodePool {
     public:
@@ -112,13 +116,13 @@ namespace Plexus {
 
         ~TaskNodePool() {
             // Free all nodes in the freelist
-            TaskNode *node = m_head.load(std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(m_mutex);
+            TaskNode *node = m_head;
             while (node) {
-                TaskNode *next = node->next.load(std::memory_order_relaxed);
+                TaskNode *next = node->next;
                 delete node;
                 node = next;
             }
-
             // Note: nodes currently in queues are NOT freed here.
             // The ThreadPool must ensure all workers are stopped before destruction.
         }
@@ -128,52 +132,42 @@ namespace Plexus {
 
         /**
          * @brief Allocate a TaskNode from the pool.
-         *
-         * Pops from freelist if available, otherwise allocates new.
          */
         TaskNode *alloc() {
-            // Try to pop from freelist (lock-free Treiber pop)
-            TaskNode *head = m_head.load(std::memory_order_acquire);
-            while (head) {
-                TaskNode *next = head->next.load(std::memory_order_relaxed);
-                if (m_head.compare_exchange_weak(head, next, std::memory_order_release,
-                                                 std::memory_order_acquire)) {
-                    head->reset();
-                    return head;
-                }
-                // head updated by CAS, retry
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_head) {
+                TaskNode *node = m_head;
+                m_head = node->next;
+                node->next = nullptr;
+                return node;
             }
-
-            // Freelist empty, allocate new
-            m_allocated.fetch_add(1, std::memory_order_relaxed);
+            ++m_allocated;
             return new TaskNode();
         }
 
         /**
          * @brief Return a TaskNode to the pool.
-         *
-         * Pushes to freelist (lock-free Treiber push).
          */
         void free(TaskNode *node) {
             if (!node)
                 return;
-
-            // Lock-free Treiber push
-            TaskNode *head = m_head.load(std::memory_order_relaxed);
-            do {
-                node->next.store(head, std::memory_order_relaxed);
-            } while (!m_head.compare_exchange_weak(head, node, std::memory_order_release,
-                                                   std::memory_order_relaxed));
+            std::lock_guard<std::mutex> lock(m_mutex);
+            node->next = m_head;
+            m_head = node;
         }
 
         /**
          * @brief Returns approximate number of nodes ever allocated.
          */
-        std::size_t allocated_count() const { return m_allocated.load(std::memory_order_relaxed); }
+        std::size_t allocated_count() const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_allocated;
+        }
 
     private:
-        std::atomic<TaskNode *> m_head{nullptr};
-        std::atomic<std::size_t> m_allocated{0};
+        mutable std::mutex m_mutex;
+        TaskNode *m_head{nullptr};
+        std::size_t m_allocated{0};
     };
 
 } // namespace Plexus
