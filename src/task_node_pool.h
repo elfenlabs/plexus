@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <concepts>
 #include <cstddef>
 #include <mutex>
 #include <new>
@@ -19,7 +20,9 @@ namespace Plexus {
     public:
         FixedFunction() = default;
 
-        template <typename F> FixedFunction(F &&f) {
+        template <typename F>
+            requires(!std::is_same_v<std::decay_t<F>, FixedFunction>)
+        FixedFunction(F &&f) {
             static_assert(sizeof(F) <= StorageSize, "Task too large for FixedFunction");
             static_assert(alignof(F) <= alignof(std::max_align_t),
                           "Task alignment too large for FixedFunction");
@@ -77,12 +80,11 @@ namespace Plexus {
         explicit operator bool() const { return m_invoke != nullptr; }
 
         void reset() {
-            if (m_invoke) {
+            if (m_invoke)
                 m_dtor(m_storage);
-                m_invoke = nullptr;
-                m_dtor = nullptr;
-                m_move = nullptr;
-            }
+            m_invoke = nullptr;
+            m_dtor = nullptr;
+            m_move = nullptr;
         }
 
     private:

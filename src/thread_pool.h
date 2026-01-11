@@ -16,6 +16,12 @@
 
 namespace Plexus {
 
+    /// Shutdown mode for ThreadPool
+    enum class ShutdownMode {
+        Drain, ///< Finish all queued/running tasks before stopping (default)
+        Cancel ///< Stop immediately, dropping queued tasks
+    };
+
     // Thread-local worker context
     inline thread_local size_t t_worker_index = SIZE_MAX;
     inline thread_local size_t t_worker_count = 0;
@@ -55,30 +61,53 @@ namespace Plexus {
             }
         }
 
-        ~ThreadPool() {
-            m_stop.store(true, std::memory_order_relaxed);
-            // Wake all workers using per-worker CVs (notify under mutex)
-            for (auto &q : m_queues) {
-                std::lock_guard<std::mutex> lock(q->mutex);
-                q->cv.notify_one();
-            }
-            for (auto &t : m_threads) {
-                if (t.joinable()) {
-                    t.join();
-                }
-            }
-            // Pool destructor will clean up any remaining nodes in freelist.
-            // Nodes still in queues are leaked - this is expected since workers are stopped.
-        }
+        ~ThreadPool() { shutdown(ShutdownMode::Drain); }
 
         ThreadPool(const ThreadPool &) = delete;
         ThreadPool &operator=(const ThreadPool &) = delete;
 
+        /**
+         * @brief Shutdown the thread pool.
+         * @param mode Drain (default) waits for all tasks; Cancel drops queued work.
+         */
+        void shutdown(ShutdownMode mode = ShutdownMode::Drain) {
+            bool expected = false;
+            if (!m_shutdown_started.compare_exchange_strong(expected, true,
+                                                            std::memory_order_acq_rel))
+                return; // Already shutting down
+
+            m_shutdown_mode.store(mode, std::memory_order_relaxed);
+            m_accepting.store(false, std::memory_order_release);
+            m_stop.store(true, std::memory_order_release);
+
+            // Wake all workers so they re-check conditions
+            for (auto &q : m_queues)
+                q->cv.notify_one();
+
+            // In Cancel mode, drain overflow queue to keep counters consistent
+            if (mode == ShutdownMode::Cancel) {
+                std::lock_guard<std::mutex> lock(m_overflow_mutex);
+                while (!m_overflow_queue.empty()) {
+                    TaskNode *node = m_overflow_queue.front();
+                    m_overflow_queue.pop_front();
+                    node->task.reset();
+                    m_pool.free(node);
+                    m_active_tasks.fetch_sub(1, std::memory_order_relaxed);
+                    m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+
+            for (auto &t : m_threads) {
+                if (t.joinable())
+                    t.join();
+            }
+        }
+
         void dispatch(std::vector<Task> &&tasks) {
             if (tasks.empty())
                 return;
-            if (m_stop.load(std::memory_order_relaxed))
-                return; // Reject when stopped
+            if (!m_accepting.load(std::memory_order_acquire))
+                return; // Reject when shutdown started
 
             const auto count = static_cast<std::int64_t>(tasks.size());
             m_active_tasks.fetch_add(count, std::memory_order_relaxed);
@@ -105,20 +134,27 @@ namespace Plexus {
                     m_overflow_queue.push_back(node);
                 }
             }
-            // Smart wake-up: wake workers (notify under mutex to avoid missed wakeups)
-            size_t tasks_count = tasks.size();
-            size_t workers_woken = 0;
-            for (size_t i = 0; i < m_queues.size() && workers_woken < tasks_count; ++i) {
-                if (m_queues[i]->sleeping.load(std::memory_order_acquire)) {
-                    std::lock_guard<std::mutex> lock(m_queues[i]->mutex);
-                    m_queues[i]->cv.notify_one();
-                    ++workers_woken;
+
+            // Always notify at least one worker unconditionally (progress guarantee)
+            // The sleeping flag is a hint that can be stale, so unconditional notify is required.
+            const auto idx = m_wake_rr.fetch_add(1, std::memory_order_relaxed) % m_queues.size();
+            m_queues[idx]->cv.notify_one();
+
+            // Best-effort: wake additional workers for batch dispatch (heuristic)
+            if (tasks.size() > 1) {
+                size_t tasks_count = tasks.size();
+                size_t workers_woken = 1;
+                for (size_t i = 0; i < m_queues.size() && workers_woken < tasks_count; ++i) {
+                    if (m_queues[i]->sleeping.load(std::memory_order_acquire)) {
+                        m_queues[i]->cv.notify_one();
+                        ++workers_woken;
+                    }
                 }
             }
         }
 
         template <typename F> void enqueue(F &&f) {
-            if (m_stop.load(std::memory_order_relaxed))
+            if (!m_accepting.load(std::memory_order_acquire))
                 throw std::runtime_error("ThreadPool stopped");
 
             m_active_tasks.fetch_add(1, std::memory_order_relaxed);
@@ -139,14 +175,10 @@ namespace Plexus {
                 std::lock_guard<std::mutex> lock(m_overflow_mutex);
                 m_overflow_queue.push_back(node);
             }
-            // Wake one sleeping worker (notify under mutex)
-            for (size_t i = 0; i < m_queues.size(); ++i) {
-                if (m_queues[i]->sleeping.load(std::memory_order_acquire)) {
-                    std::lock_guard<std::mutex> lock(m_queues[i]->mutex);
-                    m_queues[i]->cv.notify_one();
-                    break;
-                }
-            }
+
+            // Always notify at least one worker unconditionally (progress guarantee)
+            const auto idx = m_wake_rr.fetch_add(1, std::memory_order_relaxed) % m_queues.size();
+            m_queues[idx]->cv.notify_one();
         }
 
         void wait() {
@@ -187,8 +219,12 @@ namespace Plexus {
         std::mutex m_mutex;
         std::condition_variable m_cv_done;
         std::atomic<bool> m_stop{false};
+        std::atomic<bool> m_accepting{true};
+        std::atomic<bool> m_shutdown_started{false};
+        std::atomic<ShutdownMode> m_shutdown_mode{ShutdownMode::Drain};
         std::atomic<std::int64_t> m_active_tasks{0};
         std::atomic<std::int64_t> m_queued_tasks{0};
+        std::atomic<std::uint32_t> m_wake_rr{0}; // Round-robin index for notifications
 
         void worker_thread(int index) {
             t_worker_index = static_cast<size_t>(index);
@@ -277,8 +313,26 @@ namespace Plexus {
                     });
                     m_queues[index]->sleeping.store(false, std::memory_order_relaxed);
 
-                    if (m_stop.load(std::memory_order_relaxed))
-                        return;
+                    if (m_stop.load(std::memory_order_relaxed)) {
+                        auto mode = m_shutdown_mode.load(std::memory_order_relaxed);
+
+                        if (mode == ShutdownMode::Cancel) {
+                            // Drain local queue before exiting (keep counters consistent)
+                            while (TaskNode *n = m_queues[index]->queue.pop()) {
+                                n->task.reset();
+                                m_pool.free(n);
+                                m_active_tasks.fetch_sub(1, std::memory_order_relaxed);
+                                m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
+                            }
+                            return;
+                        }
+
+                        // Drain mode: check if any work remains to process
+                        if (m_queued_tasks.load(std::memory_order_relaxed) == 0 &&
+                            m_active_tasks.load(std::memory_order_relaxed) == 0)
+                            return;
+                        // Otherwise continue to process remaining work
+                    }
 
                     continue;
                 }
@@ -302,6 +356,12 @@ namespace Plexus {
                 if (prev == 1) {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     m_cv_done.notify_all();
+
+                    // In Drain shutdown, wake all workers so they can exit
+                    if (m_stop.load(std::memory_order_relaxed)) {
+                        for (auto &q : m_queues)
+                            q->cv.notify_one();
+                    }
                 }
             }
         }
