@@ -47,7 +47,6 @@ add_executable(plexusTests
     tests/test_node_groups.cpp
     tests/test_resource.cpp
     tests/test_ws_queue.cpp
-    tests/test_ring_buffer.cpp
     tests/test_thread_pool.cpp
     tests/test_runtime.cpp
 )

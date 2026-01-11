@@ -81,8 +81,7 @@ namespace Plexus {
             m_stop.store(true, std::memory_order_release);
 
             // Wake all workers so they re-check conditions
-            for (auto &q : m_queues)
-                q->cv.notify_one();
+            notify_all_workers();
 
             // In Cancel mode, drain overflow queue to keep counters consistent
             if (mode == ShutdownMode::Cancel) {
@@ -138,7 +137,7 @@ namespace Plexus {
             // Always notify at least one worker unconditionally (progress guarantee)
             // The sleeping flag is a hint that can be stale, so unconditional notify is required.
             const auto idx = m_wake_rr.fetch_add(1, std::memory_order_relaxed) % m_queues.size();
-            m_queues[idx]->cv.notify_one();
+            notify_one_worker(idx);
 
             // Best-effort: wake additional workers for batch dispatch (heuristic)
             if (tasks.size() > 1) {
@@ -146,7 +145,7 @@ namespace Plexus {
                 size_t workers_woken = 1;
                 for (size_t i = 0; i < m_queues.size() && workers_woken < tasks_count; ++i) {
                     if (m_queues[i]->sleeping.load(std::memory_order_acquire)) {
-                        m_queues[i]->cv.notify_one();
+                        notify_one_worker(i);
                         ++workers_woken;
                     }
                 }
@@ -178,7 +177,7 @@ namespace Plexus {
 
             // Always notify at least one worker unconditionally (progress guarantee)
             const auto idx = m_wake_rr.fetch_add(1, std::memory_order_relaxed) % m_queues.size();
-            m_queues[idx]->cv.notify_one();
+            notify_one_worker(idx);
         }
 
         void wait() {
@@ -225,6 +224,19 @@ namespace Plexus {
         std::atomic<std::int64_t> m_active_tasks{0};
         std::atomic<std::int64_t> m_queued_tasks{0};
         std::atomic<std::uint32_t> m_wake_rr{0}; // Round-robin index for notifications
+
+        void notify_one_worker(std::size_t idx) {
+            auto &wq = *m_queues[idx];
+            std::lock_guard<std::mutex> lock(wq.mutex);
+            wq.cv.notify_one();
+        }
+
+        void notify_all_workers() {
+            for (auto &q : m_queues) {
+                std::lock_guard<std::mutex> lock(q->mutex);
+                q->cv.notify_one();
+            }
+        }
 
         void worker_thread(int index) {
             t_worker_index = static_cast<size_t>(index);
@@ -359,8 +371,7 @@ namespace Plexus {
 
                     // In Drain shutdown, wake all workers so they can exit
                     if (m_stop.load(std::memory_order_relaxed)) {
-                        for (auto &q : m_queues)
-                            q->cv.notify_one();
+                        notify_all_workers();
                     }
                 }
             }
