@@ -112,18 +112,16 @@ TEST(ConcurrencyTest, StressRandomGraph) {
         resources.push_back(ctx.register_resource("Res_" + std::to_string(i)));
     }
 
-    // Shared data to detect races or order issues.
-    struct WriteRecord {
-        int node_id;
-        int order_ticket;
-    };
-    std::vector<std::vector<WriteRecord>> resource_data(NUM_RESOURCES);
-
     std::mt19937 rng(42);
     std::vector<int> expected_writes(NUM_RESOURCES, 0);
 
     // Global atomic counter to track execution order
     std::atomic<int> global_ticket{0};
+    std::atomic<bool> overflow{false};
+
+    // Stash configs so we can size tracking buffers before wiring work functions.
+    std::vector<Plexus::NodeConfig> configs;
+    configs.reserve(NUM_NODES);
 
     for (int i = 0; i < NUM_NODES; ++i) {
         Plexus::NodeConfig config;
@@ -147,23 +145,44 @@ TEST(ConcurrencyTest, StressRandomGraph) {
             }
         }
 
-        // Work Function
-        config.work_function = [i, &resource_data, config, &global_ticket]() {
-            // Grab ticket for this run
-            int ticket = global_ticket.fetch_add(1);
+        configs.push_back(std::move(config));
+    }
 
-            for (const auto &dep : config.dependencies) {
+    // Shared data to detect races or order issues.
+    struct WriteRecord {
+        int node_id;
+        int order_ticket;
+    };
+    std::vector<std::vector<WriteRecord>> resource_data(NUM_RESOURCES);
+    std::vector<std::atomic<int>> write_positions(NUM_RESOURCES);
+    for (int i = 0; i < NUM_RESOURCES; ++i) {
+        resource_data[i].resize(expected_writes[i]);
+        write_positions[i].store(0, std::memory_order_relaxed);
+    }
+
+    for (int i = 0; i < NUM_NODES; ++i) {
+        auto deps = configs[i].dependencies;
+        configs[i].work_function = [i, deps, &resource_data, &write_positions, &global_ticket,
+                                    &overflow]() {
+            int ticket = global_ticket.fetch_add(1, std::memory_order_relaxed);
+
+            for (const auto &dep : deps) {
                 if (dep.access == Plexus::Access::WRITE) {
-                    resource_data[dep.id].push_back({i, ticket});
+                    int slot = write_positions[dep.id].fetch_add(1, std::memory_order_relaxed);
+                    if (slot < 0 ||
+                        static_cast<size_t>(slot) >= resource_data[dep.id].size()) {
+                        overflow.store(true, std::memory_order_relaxed);
+                        continue;
+                    }
+                    resource_data[dep.id][slot] = {i, ticket};
                 } else {
-                    // Read: check size
-                    volatile size_t s = resource_data[dep.id].size();
+                    volatile int s = write_positions[dep.id].load(std::memory_order_relaxed);
                     (void)s;
                 }
             }
         };
 
-        builder.add_node(config);
+        builder.add_node(configs[i]);
     }
 
     auto graph = builder.bake();
@@ -173,7 +192,8 @@ TEST(ConcurrencyTest, StressRandomGraph) {
 
     // VERIFICATION
     for (int i = 0; i < NUM_RESOURCES; ++i) {
-        EXPECT_EQ(resource_data[i].size(), expected_writes[i]);
+        EXPECT_FALSE(overflow.load(std::memory_order_relaxed));
+        EXPECT_EQ(write_positions[i].load(std::memory_order_relaxed), expected_writes[i]);
 
         // Check strict ordering for writes
         int last_ticket = -1;
