@@ -1,0 +1,11 @@
+{
+    "benchmark_target": "plexusBenchmarks",
+    "build_type": "Release",
+    "cmake_generator": "Ninja",
+    "cmake_flags": [
+        "-DCMAKE_CXX_FLAGS=-O3 -DNDEBUG"
+    ],
+    "benchmark_args": [],
+    "worktree_dir": ".bench-worktrees",
+    "results_dir": ".bench-results"
+}
