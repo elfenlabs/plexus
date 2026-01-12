@@ -10,6 +10,16 @@
 
 namespace Plexus {
 
+#ifndef PLEXUS_WSQ_STRONG_MEMORY_ORDER
+// Chase-Lev fences are only required on weak memory models.
+// Override with -DPLEXUS_WSQ_STRONG_MEMORY_ORDER=0 if needed.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#define PLEXUS_WSQ_STRONG_MEMORY_ORDER 1
+#else
+#define PLEXUS_WSQ_STRONG_MEMORY_ORDER 0
+#endif
+#endif
+
     /**
      * Lock-free work-stealing deque based on the Chase-Lev algorithm.
      *
@@ -74,12 +84,16 @@ namespace Plexus {
         T *pop() {
             int64_t b = m_bottom.load(std::memory_order_relaxed) - 1;
 
-            // Relaxed store + seq_cst fence (per Lê et al.) to reduce barriers
-            // while preserving ordering between bottom/top operations.
+#if PLEXUS_WSQ_STRONG_MEMORY_ORDER
+            // Strong memory ordering (x86/x64): rely on seq_cst ops, no fence.
+            m_bottom.store(b, std::memory_order_seq_cst);
+            int64_t t = m_top.load(std::memory_order_seq_cst);
+#else
+            // Weak memory ordering: fence between bottom/top operations.
             m_bottom.store(b, std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_seq_cst);
-
             int64_t t = m_top.load(std::memory_order_relaxed);
+#endif
 
             if (t > b) {
                 // Queue was empty, restore bottom
@@ -119,9 +133,14 @@ namespace Plexus {
          * @return Pointer if available, nullptr if queue is empty or lost race.
          */
         T *steal() {
+#if PLEXUS_WSQ_STRONG_MEMORY_ORDER
+            int64_t t = m_top.load(std::memory_order_seq_cst);
+            int64_t b = m_bottom.load(std::memory_order_seq_cst);
+#else
             int64_t t = m_top.load(std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_seq_cst);
             int64_t b = m_bottom.load(std::memory_order_acquire);
+#endif
 
             if (t >= b) {
                 return nullptr; // empty

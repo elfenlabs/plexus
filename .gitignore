@@ -31,3 +31,7 @@ compile_commands.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Benchmark comparison tool
+.bench-worktrees/
+.bench-results/
