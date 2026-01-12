@@ -2,12 +2,14 @@
 # compare_commits.sh - Compare benchmark performance between two commits
 # Uses git worktrees to avoid disrupting your working directory
 #
-# Usage: ./scripts/compare_commits.sh [baseline_ref] [compare_ref]
-#   baseline_ref: Git ref for baseline (default: HEAD~1)
-#   compare_ref:  Git ref to compare (default: HEAD)
+# Usage: ./scripts/compare_commits.sh [options] [baseline_ref] [compare_ref]
+#   --quick         Run benchmarks with minimal iterations (faster, less accurate)
+#   baseline_ref    Git ref for baseline (default: HEAD~1)
+#   compare_ref     Git ref to compare (default: HEAD)
 #
 # Example:
 #   ./scripts/compare_commits.sh HEAD~1 HEAD
+#   ./scripts/compare_commits.sh --quick HEAD~1 HEAD
 #   ./scripts/compare_commits.sh abc123 def456
 
 set -e
@@ -27,6 +29,24 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKTREE_DIR="$PROJECT_ROOT/.bench-worktrees"
 RESULTS_DIR="$PROJECT_ROOT/.bench-results"
 BENCHMARK_TARGET="plexusBenchmarks"
+
+# Parse options
+QUICK_MODE=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --quick|-q)
+            QUICK_MODE=true
+            shift
+            ;;
+        -*)
+            echo -e "${RED}Unknown option: $1${NC}" >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 # Arguments with defaults
 BASELINE_REF="${1:-HEAD~1}"
@@ -54,12 +74,11 @@ echo ""
 # Create directories
 mkdir -p "$WORKTREE_DIR" "$RESULTS_DIR"
 
-# Cleanup function
+# Cleanup function - only cleans up if not caching
 cleanup() {
-    echo -e "\n${YELLOW}Cleaning up worktrees...${NC}"
-    git -C "$PROJECT_ROOT" worktree remove --force "$WORKTREE_DIR/baseline" 2>/dev/null || true
-    git -C "$PROJECT_ROOT" worktree remove --force "$WORKTREE_DIR/compare" 2>/dev/null || true
-    rmdir "$WORKTREE_DIR" 2>/dev/null || true
+    # Don't clean up - keep worktrees for faster subsequent runs
+    # To manually clean: rm -rf .bench-worktrees .bench-results
+    :
 }
 
 # Set trap for cleanup on exit
@@ -71,38 +90,54 @@ run_benchmarks() {
     local ref="$1"
     local hash="$2"
     local name="$3"
-    local worktree_path="$WORKTREE_DIR/$name"
+    local worktree_path="$WORKTREE_DIR/$hash"  # Use hash as directory name for caching
     RESULT_FILE="$RESULTS_DIR/${name}_${hash}.json"
     
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BLUE}[$name]${NC} Setting up worktree for ${YELLOW}$ref ($hash)${NC}"
     
-    # Remove existing worktree if present
-    git -C "$PROJECT_ROOT" worktree remove --force "$worktree_path" 2>/dev/null || true
-    
-    # Create worktree
-    git -C "$PROJECT_ROOT" worktree add "$worktree_path" "$hash" --quiet
-    
-    echo -e "${BLUE}[$name]${NC} Building..."
-    
-    # Build in the worktree (use Ninja for faster builds)
-    cmake -S "$worktree_path" -B "$worktree_path/build" \
-        -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
-        > /dev/null 2>&1
-    
-    cmake --build "$worktree_path/build" --target "$BENCHMARK_TARGET" > /dev/null 2>&1
+    # Check if we already have a built worktree for this commit
+    if [[ -x "$worktree_path/build/$BENCHMARK_TARGET" ]]; then
+        echo -e "${GREEN}[$name]${NC} Reusing cached build for ${YELLOW}$ref ($hash)${NC}"
+    else
+        echo -e "${BLUE}[$name]${NC} Setting up worktree for ${YELLOW}$ref ($hash)${NC}"
+        
+        # Remove existing worktree if present (might be stale)
+        git -C "$PROJECT_ROOT" worktree remove --force "$worktree_path" 2>/dev/null || true
+        
+        # Create worktree
+        git -C "$PROJECT_ROOT" worktree add "$worktree_path" "$hash" --quiet
+        
+        echo -e "${BLUE}[$name]${NC} Building..."
+        
+        # Build in the worktree (use Ninja for faster builds)
+        cmake -S "$worktree_path" -B "$worktree_path/build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
+            > /dev/null 2>&1
+        
+        cmake --build "$worktree_path/build" --target "$BENCHMARK_TARGET" > /dev/null 2>&1
+    fi
     
     echo -e "${BLUE}[$name]${NC} Running benchmarks..."
     
+    # Build benchmark arguments
+    local bench_args=(
+        --benchmark_format=json
+        --benchmark_out="$RESULT_FILE"
+        --benchmark_report_aggregates_only=true
+    )
+    
+    if [[ "$QUICK_MODE" == true ]]; then
+        # Quick mode: minimal time per benchmark, single repetition
+        bench_args+=(--benchmark_min_time=0.1s --benchmark_repetitions=1)
+    else
+        # Normal mode: 3 repetitions for statistical stability
+        bench_args+=(--benchmark_repetitions=3)
+    fi
+    
     # Run benchmarks and save JSON output
-    "$worktree_path/build/$BENCHMARK_TARGET" \
-        --benchmark_format=json \
-        --benchmark_out="$RESULT_FILE" \
-        --benchmark_repetitions=3 \
-        --benchmark_report_aggregates_only=true \
-        > /dev/null 2>&1
+    "$worktree_path/build/$BENCHMARK_TARGET" "${bench_args[@]}" > /dev/null 2>&1
     
     echo -e "${GREEN}[$name]${NC} Results saved to ${CYAN}$RESULT_FILE${NC}"
 }
@@ -156,9 +191,21 @@ print("─" * 90)
 
 all_names = sorted(set(baseline.keys()) | set(compare.keys()))
 
+# Check if we have aggregated results (_mean suffix) or raw results
+has_mean = any('_mean' in name for name in all_names)
+
 for name in all_names:
-    if '_mean' not in name:
-        continue
+    # Filter appropriately based on result type
+    if has_mean:
+        # With repetitions: only show _mean, skip _median/_stddev/etc
+        if '_mean' not in name:
+            continue
+        display_name = name.replace('_mean', '')
+    else:
+        # Quick mode (single run): show all, skip aggregate suffixes if any
+        if any(suffix in name for suffix in ['_median', '_stddev', '_cv']):
+            continue
+        display_name = name
     
     b = baseline.get(name, {})
     c = compare.get(name, {})
@@ -201,7 +248,6 @@ for name in all_names:
                 return f"{t:.1f} ns"
         
         unit = b.get('time_unit', 'ns')
-        display_name = name.replace('_mean', '')
         
         print(f"{display_name:<50} {fmt_time(b_time, unit):>14} {fmt_time(c_time, unit):>14} {color}{symbol} {change:+.1f}%{reset}")
 
