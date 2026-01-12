@@ -155,13 +155,15 @@ namespace Plexus {
         bool empty_approx() const noexcept { return size_approx() == 0u; }
 
     private:
-        static constexpr std::size_t cacheline_size() noexcept {
-#if defined(__cpp_lib_hardware_interference_size) && __cpp_lib_hardware_interference_size >= 201703L
-            return std::hardware_destructive_interference_size;
-#else
-            return 64; // reasonable fallback
+        // Cache line size for false-sharing prevention. Default 64 bytes works
+        // for x86/x64 and most ARM. Override with -DPLEXUS_CACHELINE_SIZE=128
+        // for POWER9, some ARM Neoverse, or other exotic architectures.
+        // Note: We avoid std::hardware_destructive_interference_size because
+        // GCC's -Winterference-size warns about ABI instability.
+#ifndef PLEXUS_CACHELINE_SIZE
+#define PLEXUS_CACHELINE_SIZE 64
 #endif
-        }
+        static constexpr std::size_t cacheline_size() noexcept { return PLEXUS_CACHELINE_SIZE; }
 
         static std::size_t bit_ceil_at_least_2(std::size_t x) {
             x = (x < 2) ? 2 : x;
