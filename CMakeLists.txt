@@ -71,6 +71,7 @@ gtest_discover_tests(plexusTests)
 # Benchmarks
 add_executable(plexusBenchmarks
     benchmarks/benchmark_thread_pool.cpp
+    benchmarks/benchmark_work_stealing_queue.cpp
 )
 target_link_libraries(plexusBenchmarks PRIVATE plexusCore benchmark::benchmark_main)
 target_include_directories(plexusBenchmarks PRIVATE src)

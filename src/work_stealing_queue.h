@@ -62,7 +62,7 @@ namespace Plexus {
             // Store pointer. The release on bottom below will make this visible.
             m_buffer[idx].store(ptr, std::memory_order_relaxed);
 
-            // Publish: this release pairs with acquire in steal's buffer load.
+            // Publish: this release pairs with acquire in steal's bottom load.
             m_bottom.store(b + 1, std::memory_order_release);
             return true;
         }
@@ -74,10 +74,12 @@ namespace Plexus {
         T *pop() {
             int64_t b = m_bottom.load(std::memory_order_relaxed) - 1;
 
-            // seq_cst store to synchronize with steal's operations
-            m_bottom.store(b, std::memory_order_seq_cst);
+            // Relaxed store + seq_cst fence (per Lê et al.) to reduce barriers
+            // while preserving ordering between bottom/top operations.
+            m_bottom.store(b, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
 
-            int64_t t = m_top.load(std::memory_order_seq_cst);
+            int64_t t = m_top.load(std::memory_order_relaxed);
 
             if (t > b) {
                 // Queue was empty, restore bottom
@@ -90,7 +92,7 @@ namespace Plexus {
             // Read pointer BEFORE potential CAS (critical for t == b case).
             // Chase-Lev requires reading element before CAS because after
             // CAS the slot may be refilled by a concurrent push.
-            T *ptr = m_buffer[idx].load(std::memory_order_acquire);
+            T *ptr = m_buffer[idx].load(std::memory_order_relaxed);
 
             if (t == b) {
                 // Last element - race with thieves for the same slot.
@@ -117,8 +119,9 @@ namespace Plexus {
          * @return Pointer if available, nullptr if queue is empty or lost race.
          */
         T *steal() {
-            int64_t t = m_top.load(std::memory_order_seq_cst);
-            int64_t b = m_bottom.load(std::memory_order_seq_cst);
+            int64_t t = m_top.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            int64_t b = m_bottom.load(std::memory_order_acquire);
 
             if (t >= b) {
                 return nullptr; // empty
@@ -129,7 +132,7 @@ namespace Plexus {
             // Read pointer BEFORE CAS (critical!).
             // Chase-Lev requires reading element before CAS because after
             // CAS the slot may be refilled by a concurrent push.
-            T *ptr = m_buffer[idx].load(std::memory_order_acquire);
+            T *ptr = m_buffer[idx].load(std::memory_order_relaxed);
 
             // Attempt to claim this slot by incrementing top
             if (!m_top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst,
