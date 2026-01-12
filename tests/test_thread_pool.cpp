@@ -1,8 +1,10 @@
 #include "../src/thread_pool.h"
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <gtest/gtest.h>
 #include <thread>
+#include <vector>
 
 using namespace Plexus;
 
@@ -199,4 +201,90 @@ TEST(ThreadPoolTest, TasksFromWorkerThread) {
     pool.wait();
 
     EXPECT_EQ(count, 3);
+}
+
+TEST(ThreadPoolTest, ConcurrentExternalEnqueueStress) {
+    ThreadPool pool;
+
+    constexpr int producers = 6;
+    constexpr int tasks_per_producer = 8000;
+    constexpr int total_tasks = producers * tasks_per_producer;
+
+    std::atomic<int> remaining{total_tasks};
+    std::atomic<int> executed{0};
+    std::promise<void> done;
+    auto done_future = done.get_future();
+
+    std::vector<std::thread> threads;
+    threads.reserve(producers);
+    for (int t = 0; t < producers; ++t) {
+        threads.emplace_back([&]() {
+            for (int i = 0; i < tasks_per_producer; ++i) {
+                pool.enqueue([&]() {
+                    executed.fetch_add(1, std::memory_order_relaxed);
+                    if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        done.set_value();
+                    }
+                });
+            }
+        });
+    }
+
+    for (auto &t : threads) {
+        t.join();
+    }
+
+    if (done_future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        pool.shutdown(ShutdownMode::Cancel);
+        FAIL() << "Timed out waiting for all tasks (possible missed wakeup or lost task)";
+    }
+
+    EXPECT_EQ(executed.load(std::memory_order_relaxed), total_tasks);
+    EXPECT_EQ(remaining.load(std::memory_order_relaxed), 0);
+}
+
+TEST(ThreadPoolTest, ConcurrentDispatchStress) {
+    ThreadPool pool;
+
+    constexpr int producers = 4;
+    constexpr int batches_per_producer = 250;
+    constexpr int batch_size = 32;
+    constexpr int total_tasks = producers * batches_per_producer * batch_size;
+
+    std::atomic<int> remaining{total_tasks};
+    std::atomic<int> executed{0};
+    std::promise<void> done;
+    auto done_future = done.get_future();
+
+    std::vector<std::thread> threads;
+    threads.reserve(producers);
+    for (int t = 0; t < producers; ++t) {
+        threads.emplace_back([&]() {
+            for (int b = 0; b < batches_per_producer; ++b) {
+                std::vector<ThreadPool::Task> tasks;
+                tasks.reserve(batch_size);
+                for (int i = 0; i < batch_size; ++i) {
+                    tasks.emplace_back([&]() {
+                        executed.fetch_add(1, std::memory_order_relaxed);
+                        if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                            done.set_value();
+                        }
+                    });
+                }
+                pool.dispatch(std::move(tasks));
+            }
+        });
+    }
+
+    for (auto &t : threads) {
+        t.join();
+    }
+
+    if (done_future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        pool.shutdown(ShutdownMode::Cancel);
+        FAIL() << "Timed out waiting for all dispatched tasks (possible missed wakeup or lost task)";
+    }
+
+    EXPECT_EQ(executed.load(std::memory_order_relaxed), total_tasks);
+    EXPECT_EQ(remaining.load(std::memory_order_relaxed), 0);
 }

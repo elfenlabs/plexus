@@ -2,6 +2,7 @@
 #include "plexus/graph_builder.h"
 #include "thread_pool.h"
 #include <atomic>
+#include <algorithm>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <numeric>
@@ -16,8 +17,8 @@ TEST(StressLoopTest, DescendantBiasedLoop) {
         std::atomic<int> ticket{0};
 
         const int NUM_TREES = 50;
-        std::vector<int> heavy_root_tickets(NUM_TREES, 0);
-        std::vector<int> light_root_tickets(NUM_TREES, 0);
+        std::vector<int> heavy_root_tickets(NUM_TREES, -1);
+        std::vector<int> light_root_tickets(NUM_TREES, -1);
 
         for (int i = 0; i < NUM_TREES; ++i) {
             auto heavy_root =
@@ -43,5 +44,21 @@ TEST(StressLoopTest, DescendantBiasedLoop) {
         }
 
         executor.run(graph);
+
+        EXPECT_EQ(ticket.load(std::memory_order_relaxed), NUM_TREES * 2);
+
+        std::vector<int> all_tickets;
+        all_tickets.reserve(NUM_TREES * 2);
+        for (int i = 0; i < NUM_TREES; ++i) {
+            ASSERT_NE(heavy_root_tickets[i], -1);
+            ASSERT_NE(light_root_tickets[i], -1);
+            all_tickets.push_back(heavy_root_tickets[i]);
+            all_tickets.push_back(light_root_tickets[i]);
+        }
+
+        std::sort(all_tickets.begin(), all_tickets.end());
+        EXPECT_EQ(all_tickets.front(), 0);
+        EXPECT_EQ(all_tickets.back(), NUM_TREES * 2 - 1);
+        EXPECT_EQ(std::unique(all_tickets.begin(), all_tickets.end()), all_tickets.end());
     }
 }

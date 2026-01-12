@@ -1,4 +1,5 @@
 # Build directories
+build-tsan/
 build/
 out/
 bin/
