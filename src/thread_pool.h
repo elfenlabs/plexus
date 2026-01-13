@@ -34,6 +34,8 @@ namespace Plexus {
      * algorithm) for lock-free local operations.
      * - **Work Stealing**: Idle threads steal work from other threads using the lock-free
      * `steal()` method.
+     * - **Per-Worker Inject Queues**: External producers spread tasks across MPSC queues to
+     * reduce overflow contention.
      * - **Central Overflow Queue**: When worker queues are full, tasks spill to a mutex-protected
      * central queue.
      * - **LIFO Scheduling**: Local workers pop from the back (LIFO) for better cache locality.
@@ -94,6 +96,7 @@ namespace Plexus {
                     m_active_tasks.fetch_sub(1, std::memory_order_relaxed);
                     m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
                 }
+                m_overflow_nonempty.store(false, std::memory_order_relaxed);
             }
 
             for (auto &t : m_threads) {
@@ -121,17 +124,33 @@ namespace Plexus {
                     if (!m_queues[worker_idx]->queue.push(node)) {
                         // Queue full, spill to central
                         std::lock_guard<std::mutex> lock(m_overflow_mutex);
+                        const bool was_empty = m_overflow_queue.empty();
                         m_overflow_queue.push_back(node);
+                        if (was_empty) {
+                            m_overflow_nonempty.store(true, std::memory_order_relaxed);
+                        }
                     }
                 }
             } else {
-                // External thread: push all to central queue (mutex-protected)
-                std::lock_guard<std::mutex> lock(m_overflow_mutex);
-                for (auto &task : tasks) {
+                // External thread: spread across per-worker inject queues (MPSC)
+                const size_t worker_count = m_queues.size();
+                const size_t task_count = tasks.size();
+                const size_t start =
+                    m_inject_rr.fetch_add(task_count, std::memory_order_relaxed);
+
+                for (size_t i = 0; i < task_count; ++i) {
                     TaskNode *node = m_pool.alloc();
-                    node->task = std::move(task);
-                    m_overflow_queue.push_back(node);
+                    node->task = std::move(tasks[i]);
+                    const size_t idx = (start + i) % worker_count;
+                    m_queues[idx]->inject.push(node);
                 }
+
+                const size_t to_notify = std::min(task_count, worker_count);
+                for (size_t i = 0; i < to_notify; ++i) {
+                    const size_t idx = (start + i) % worker_count;
+                    notify_one_worker(idx);
+                }
+                return;
             }
 
             // Always notify at least one worker unconditionally (progress guarantee)
@@ -167,12 +186,19 @@ namespace Plexus {
                 if (!m_queues[t_worker_index]->queue.push(node)) {
                     // Queue full, spill to central
                     std::lock_guard<std::mutex> lock(m_overflow_mutex);
+                    const bool was_empty = m_overflow_queue.empty();
                     m_overflow_queue.push_back(node);
+                    if (was_empty) {
+                        m_overflow_nonempty.store(true, std::memory_order_relaxed);
+                    }
                 }
             } else {
-                // External thread: push to central queue (mutex-protected)
-                std::lock_guard<std::mutex> lock(m_overflow_mutex);
-                m_overflow_queue.push_back(node);
+                // External thread: push to per-worker inject queue (MPSC)
+                const size_t idx =
+                    m_inject_rr.fetch_add(1, std::memory_order_relaxed) % m_queues.size();
+                m_queues[idx]->inject.push(node);
+                notify_one_worker(idx);
+                return;
             }
 
             // Always notify at least one worker unconditionally (progress guarantee)
@@ -197,8 +223,47 @@ namespace Plexus {
         size_t worker_count() const { return m_queues.size(); }
 
     private:
+        struct MpscInjectQueue {
+            std::atomic<TaskNode *> head{nullptr};
+            TaskNode *local{nullptr}; // Consumer-only list
+
+            void push(TaskNode *node) {
+                TaskNode *prev = head.load(std::memory_order_relaxed);
+                do {
+                    node->next = prev;
+                } while (!head.compare_exchange_weak(prev, node, std::memory_order_release,
+                                                     std::memory_order_relaxed));
+            }
+
+            TaskNode *pop() {
+                if (!local) {
+                    TaskNode *list = head.exchange(nullptr, std::memory_order_acquire);
+                    if (!list) {
+                        return nullptr;
+                    }
+                    local = reverse_list(list);
+                }
+                TaskNode *node = local;
+                local = node->next;
+                node->next = nullptr;
+                return node;
+            }
+
+            static TaskNode *reverse_list(TaskNode *node) {
+                TaskNode *prev = nullptr;
+                while (node) {
+                    TaskNode *next = node->next;
+                    node->next = prev;
+                    prev = node;
+                    node = next;
+                }
+                return prev;
+            }
+        };
+
         struct alignas(64) WorkQueue {
             WorkStealingQueue<TaskNode> queue;
+            MpscInjectQueue inject;
             std::mutex mutex;                  // Per-worker mutex for CV
             std::condition_variable cv;        // Per-worker condition variable
             std::atomic<bool> sleeping{false}; // Is this worker sleeping?
@@ -213,6 +278,7 @@ namespace Plexus {
         // Central overflow queue for when worker queues are full
         std::mutex m_overflow_mutex;
         std::deque<TaskNode *> m_overflow_queue;
+        std::atomic<bool> m_overflow_nonempty{false}; // Hint to skip overflow try_lock when empty
 
         // Global synchronization for completion and stopping
         std::mutex m_mutex;
@@ -224,6 +290,7 @@ namespace Plexus {
         std::atomic<std::int64_t> m_active_tasks{0};
         std::atomic<std::int64_t> m_queued_tasks{0};
         std::atomic<std::uint32_t> m_wake_rr{0}; // Round-robin index for notifications
+        std::atomic<std::size_t> m_inject_rr{0};
 
         void notify_one_worker(std::size_t idx) {
             auto &wq = *m_queues[idx];
@@ -242,12 +309,18 @@ namespace Plexus {
             t_worker_index = static_cast<size_t>(index);
             t_worker_count = m_queues.size();
             const size_t queue_count = m_queues.size();
+            const size_t worker_index = static_cast<size_t>(index);
 
             while (true) {
                 TaskNode *node = nullptr;
 
                 // 1. Try local queue (LIFO for cache locality) - LOCK-FREE
                 node = m_queues[index]->queue.pop();
+
+                if (!node) {
+                    // 1b. Try per-worker inject queue (MPSC, consumer-local)
+                    node = m_queues[index]->inject.pop();
+                }
 
                 if (!node) {
                     // 2. Steal from other worker queues - LOCK-FREE
@@ -260,23 +333,7 @@ namespace Plexus {
                 // 3. Try central overflow queue if we still don't have a task
                 // Batch-grab: take half of available tasks to reduce contention
                 if (!node) {
-                    std::unique_lock<std::mutex> lock(m_overflow_mutex, std::try_to_lock);
-                    if (lock && !m_overflow_queue.empty()) {
-                        // Take one task for immediate execution
-                        node = m_overflow_queue.front();
-                        m_overflow_queue.pop_front();
-
-                        // Batch-grab: take up to half of remaining tasks for local queue
-                        size_t remaining = m_overflow_queue.size();
-                        size_t to_grab = std::min(remaining / 2, size_t{64});
-
-                        for (size_t i = 0; i < to_grab; ++i) {
-                            if (!m_queues[index]->queue.push(m_overflow_queue.front())) {
-                                break; // Local queue full
-                            }
-                            m_overflow_queue.pop_front();
-                        }
-                    }
+                    try_pop_overflow(worker_index, node);
                 }
 
                 // 4. Exponential backoff spin-wait before blocking
@@ -289,24 +346,14 @@ namespace Plexus {
                             break;
                         }
 
-                        // Quick check overflow queue with batch-grab
-                        {
-                            std::unique_lock<std::mutex> lock(m_overflow_mutex, std::try_to_lock);
-                            if (lock && !m_overflow_queue.empty()) {
-                                node = m_overflow_queue.front();
-                                m_overflow_queue.pop_front();
+                        node = m_queues[index]->inject.pop();
+                        if (node) {
+                            break;
+                        }
 
-                                // Batch-grab remaining tasks
-                                size_t remaining = m_overflow_queue.size();
-                                size_t to_grab = std::min(remaining / 2, size_t{64});
-                                for (size_t i = 0; i < to_grab; ++i) {
-                                    if (!m_queues[index]->queue.push(m_overflow_queue.front())) {
-                                        break;
-                                    }
-                                    m_overflow_queue.pop_front();
-                                }
-                                break;
-                            }
+                        // Quick check overflow queue with batch-grab
+                        if (try_pop_overflow_hint(worker_index, node)) {
+                            break;
                         }
 
                         // Backoff: yield multiple times based on spin iteration
@@ -332,6 +379,12 @@ namespace Plexus {
                         if (mode == ShutdownMode::Cancel) {
                             // Drain local queue before exiting (keep counters consistent)
                             while (TaskNode *n = m_queues[index]->queue.pop()) {
+                                n->task.reset();
+                                m_pool.free(n);
+                                m_active_tasks.fetch_sub(1, std::memory_order_relaxed);
+                                m_queued_tasks.fetch_sub(1, std::memory_order_relaxed);
+                            }
+                            while (TaskNode *n = m_queues[index]->inject.pop()) {
                                 n->task.reset();
                                 m_pool.free(n);
                                 m_active_tasks.fetch_sub(1, std::memory_order_relaxed);
@@ -376,6 +429,44 @@ namespace Plexus {
                     }
                 }
             }
+        }
+
+        bool try_pop_overflow(size_t index, TaskNode *&node) {
+            std::unique_lock<std::mutex> lock(m_overflow_mutex, std::try_to_lock);
+            if (!lock) {
+                return false;
+            }
+            if (m_overflow_queue.empty()) {
+                m_overflow_nonempty.store(false, std::memory_order_relaxed);
+                return false;
+            }
+            m_overflow_nonempty.store(true, std::memory_order_relaxed);
+
+            node = m_overflow_queue.front();
+            m_overflow_queue.pop_front();
+
+            size_t remaining = m_overflow_queue.size();
+            size_t to_grab = std::min(remaining / 2, size_t{64});
+
+            for (size_t i = 0; i < to_grab; ++i) {
+                TaskNode *extra = m_overflow_queue.front();
+                if (!m_queues[index]->queue.push(extra)) {
+                    break;
+                }
+                m_overflow_queue.pop_front();
+            }
+
+            if (m_overflow_queue.empty()) {
+                m_overflow_nonempty.store(false, std::memory_order_relaxed);
+            }
+            return true;
+        }
+
+        bool try_pop_overflow_hint(size_t index, TaskNode *&node) {
+            if (!m_overflow_nonempty.load(std::memory_order_relaxed)) {
+                return false;
+            }
+            return try_pop_overflow(index, node);
         }
     };
 
