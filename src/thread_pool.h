@@ -35,7 +35,8 @@ namespace Plexus {
      * - **Work Stealing**: Idle threads steal work from other threads using the lock-free
      * `steal()` method.
      * - **Per-Worker Inject Queues**: External producers spread tasks across MPSC queues to
-     * reduce overflow contention.
+     * reduce overflow contention; queues are single-consumer and non-stealable to keep enqueues
+     * lock-free.
      * - **Central Overflow Queue**: When worker queues are full, tasks spill to a mutex-protected
      * central queue.
      * - **LIFO Scheduling**: Local workers pop from the back (LIFO) for better cache locality.
@@ -225,7 +226,7 @@ namespace Plexus {
     private:
         struct MpscInjectQueue {
             std::atomic<TaskNode *> head{nullptr};
-            TaskNode *local{nullptr}; // Consumer-only list
+            TaskNode *local{nullptr}; // Consumer-only list; not stealable by other workers
 
             void push(TaskNode *node) {
                 TaskNode *prev = head.load(std::memory_order_relaxed);
@@ -318,7 +319,7 @@ namespace Plexus {
                 node = m_queues[index]->queue.pop();
 
                 if (!node) {
-                    // 1b. Try per-worker inject queue (MPSC, consumer-local)
+                    // 1b. Try per-worker inject queue (MPSC, consumer-local; not stealable)
                     node = m_queues[index]->inject.pop();
                 }
 

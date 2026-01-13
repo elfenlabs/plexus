@@ -109,6 +109,41 @@ TEST(ThreadPoolTest, BatchDispatch) {
     EXPECT_EQ(count, NUM_TASKS);
 }
 
+TEST(ThreadPoolTest, ExternalDispatchFansOutToWorkers) {
+    ThreadPool pool(4);
+    const size_t workers = pool.worker_count();
+    if (workers < 2) {
+        GTEST_SKIP() << "Need at least two workers for fanout test";
+    }
+
+    std::vector<std::atomic<int>> per_worker(workers);
+    for (auto &count : per_worker) {
+        count.store(0, std::memory_order_relaxed);
+    }
+    std::atomic<int> invalid{0};
+
+    std::vector<ThreadPool::Task> tasks;
+    tasks.reserve(workers);
+    for (size_t i = 0; i < workers; ++i) {
+        tasks.emplace_back([&]() {
+            const size_t idx = t_worker_index;
+            if (idx >= workers) {
+                invalid.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            per_worker[idx].fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+
+    pool.dispatch(std::move(tasks));
+    pool.wait();
+
+    EXPECT_EQ(invalid.load(std::memory_order_relaxed), 0);
+    for (size_t i = 0; i < workers; ++i) {
+        EXPECT_EQ(per_worker[i].load(std::memory_order_relaxed), 1);
+    }
+}
+
 TEST(ThreadPoolTest, EmptyDispatchNoOp) {
     ThreadPool pool;
     std::vector<ThreadPool::Task> tasks;
