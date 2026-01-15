@@ -1,52 +1,109 @@
 # Module: include
 
-**Purpose**: This module provides the core abstractions and utilities for managing resources, nodes, execution graphs, and context in a computational graph framework.
+**Purpose**: Provides core abstractions for building and executing dataflow graphs with resource management, node execution, and concurrency control.
 
 **Location**: `/home/yonder/projects/plexus/include`
+
+**Consumes**: 
+- Context and resource definitions
+- Node configurations and dependencies
+- Function traits for type deduction
+
+**Produces**: 
+- Execution graphs
+- Node execution handles
+- Resource access wrappers
 
 ## Dependencies
 
 **Depends on**:
-- `context.h` - Provides the context management for the system.
-- `node.h` - Defines the node structure and its configurations.
-- `execution_graph.h` - Manages the execution graph and nodes within it.
-- `resource.h` - Handles resource access (read/write) mechanisms.
+- `plexus/context.h` – For managing execution context and node state
+- `plexus/node.h` – For defining node structures and dependencies
+- `plexus/resource.h` – For resource access and lifecycle management
+- `plexus/execution_graph.h` – For graph structure and node relationships
+- `plexus/function_traits.h` – For type deduction in node creation
 
 **Depended by**:
-- `graph_builder.h` - Uses various components from this module to build graphs.
-- `executor.h` - Utilizes resources, context, and nodes for executing tasks in parallel.
+- `plexus/executor` – Uses `ExecutionGraph` and `GraphBuilder` to run tasks
+- `plexus/graph_builder` – Builds execution graphs from node definitions
+- Unknown – No other modules explicitly depend on this module
 
 ## Key Components
 
-- **Resource**: Manages read and write access to data resources.
-- **Node**: Represents a computational node with dependencies and configurations.
-- **ExecutionGraph**: Manages the structure of the execution graph.
-- **Context**: Provides the runtime environment and state management.
-- **GraphBuilder**: Constructs execution graphs by adding nodes.
+- `GraphBuilder` – Constructs execution graphs by adding nodes with dependencies
+- `Resource` – Encapsulates shared data with read/write access control
+- `Context` – Manages global execution state and node lifecycle
+- `Executor` – Runs graphs asynchronously using a thread pool
+- `ReadAccess` / `WriteAccess` – RAII wrappers for safe resource access
 
 ## Public Interface
 
-- `ReadAccess<T>` - Returns a read access object for a resource.
-- `WriteAccess<T>` - Returns a write access object for a resource.
-- `NodeGroupConfig` - Configures groups of nodes.
-- `NodeConfig` - Configures individual nodes.
-- `GraphBuilder::add_node()` - Adds a node to the graph.
-- `Executor` - Manages the execution of tasks in parallel.
+- `GraphBuilder::add_node(...)` – Adds a node with specified work and resource accesses
+- `Resource<T>::get()` / `get_mut()` – Accesses resource data safely
+- `Read(const Resource<T>&)` / `Write(Resource<T>&)` – Wraps access for dependency tracking
+- `Executor::execute()` – Runs an execution graph asynchronously
+- `Context::get_node()` – Retrieves node configuration by ID
+
+## Common Usage Patterns
+
+### Basic Usage
+```cpp
+Context ctx;
+GraphBuilder builder(ctx);
+
+auto node_id = builder.add_node("compute", []() { /* work */ },
+                                Write(res));
+```
+
+### Async Execution
+```cpp
+Executor exec;
+auto handle = exec.execute(graph);
+handle.wait(); // Wait for completion
+```
+
+## Critical Patterns
+
+```cpp
+// Resources must be accessed via Read/Write wrappers
+auto access = Read(resource);
+auto data = access.get(); // Safe read access
+```
+
+```cpp
+// Node functions must be callable with correct signature
+auto node_id = builder.add_node("func", [](int x) { return x * 2; },
+                                 Read(res));
+```
+
+```cpp
+// GraphBuilder tracks dependencies automatically
+auto node_id = builder.add_node("process", work, Read(res1), Write(res2));
+```
 
 ## Invariants & Design Notes
 
-- The resource system ensures that read and write operations are properly managed to avoid data races.
-- Nodes must be configured with appropriate dependencies before being added to the graph.
-- The context provides a consistent runtime environment for all nodes within the graph.
-- The graph builder ensures that the structure of the execution graph is valid and can be executed.
+- All resource access must go through `Read`/`Write` wrappers to track dependencies
+- Nodes are added in topological order to ensure valid execution graph
+- `Context` owns all nodes and resources; no external ownership is allowed
+- `Executor` uses a thread pool for asynchronous execution with futures
+- `GraphBuilder` deduces node types using `function_traits` for compile-time safety
 
 ## File List
 
-- `runtime.h` – Defines basic system utilities.
-- `resource.h` – Manages resource access mechanisms.
-- `execution_graph.h` – Manages the structure of the execution graph.
-- `node.h` – Defines node structures and configurations.
-- `context.h` – Provides context management for the system.
-- `graph_builder.h` – Constructs execution graphs by adding nodes.
-- `executor.h` – Manages task execution in parallel.
-- `function_traits.h` – Provides utility functions to infer function traits.
+- `runtime.h` – Defines runtime-related types and utilities
+- `resource.h` – Declares `Resource`, `ReadAccess`, `WriteAccess` types
+- `execution_graph.h` – Defines `ExecutionGraph` and `Node` structures
+- `node.h` – Declares `Dependency`, `NodeConfig`, and related types
+- `context.h` – Defines `Context` for managing execution state
+- `graph_builder.h` – Implements `GraphBuilder` for constructing execution graphs
+- `executor.h` – Implements `Executor` for running graphs asynchronously
+- `function_traits.h` – Provides compile-time introspection of function signatures
+---
+*Generated: 2026-01-15T10:39:08 | Source hash: 8e07e99 | llmap v0.1.0*
+
+---
+
+## Related Modules
+
+*No direct module dependencies detected.*
