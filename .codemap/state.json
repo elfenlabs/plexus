@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "last_run": "2026-01-15T07:05:12.544142Z",
+  "files": {
+    "src/executor.cpp": {
+      "hash": "sha256:8571bef69b8d68d283e6beb99cacd38d41d5727a643380ef8cec0e0e9781698d",
+      "module": "src"
+    },
+    "src/task_node_pool.h": {
+      "hash": "sha256:931b5633a7343ff1a01d47bae5d1d61b6b1a72c7b3e1101c87c45a5d1e8a9017",
+      "module": "src"
+    },
+    "src/work_stealing_queue.h": {
+      "hash": "sha256:20b4b40603e0b480cbb8fc8aff05f22bdce6921276719a9ade32d35fbb680fe4",
+      "module": "src"
+    },
+    "src/runtime.cpp": {
+      "hash": "sha256:1fd93660582dc5b6f9c6fe8d2ac3ca185646e1488bcace0cada383bc47e1e4a4",
+      "module": "src"
+    },
+    "src/graph_builder.cpp": {
+      "hash": "sha256:e5688e4db4cb02d0931e0fb93671c82be7bd6dbd0f3a8e4908c451b72b511ed9",
+      "module": "src"
+    },
+    "src/thread_pool.h": {
+      "hash": "sha256:893ca41acefbbbac6392c773f90c2e21de881eac8fed72070ffd7bbc2dc13a89",
+      "module": "src"
+    },
+    "src/execution_graph.cpp": {
+      "hash": "sha256:949fc4dd3d99045fc70940504a8f5c0f0b39cc42fa10fc3f9074e11cf7df126e",
+      "module": "src"
+    },
+    "src/context.cpp": {
+      "hash": "sha256:ba623e43af1aaf079d0b89b54ee59319ac27dea52d83f4f32f12b623ddfef932",
+      "module": "src"
+    },
+    "include/plexus/runtime.h": {
+      "hash": "sha256:a32663446abb9a6671263b39c173dbe85dcb8ba8438d2aabc9d53ada1e07fbd6",
+      "module": "include"
+    },
+    "include/plexus/resource.h": {
+      "hash": "sha256:cfa2b3b47ff2af0cdc695f7b2a31536204f9bc3ae67cafe295fc47f06dfd7e09",
+      "module": "include"
+    },
+    "include/plexus/execution_graph.h": {
+      "hash": "sha256:6a39ce120c2b1889165335d53c50877aebbdae84046abbb234f012a78a03e835",
+      "module": "include"
+    },
+    "include/plexus/node.h": {
+      "hash": "sha256:fc740240c550e2e605955fd5929fab50cfb37bfbb5a6c55d893b23d59cbba138",
+      "module": "include"
+    },
+    "include/plexus/context.h": {
+      "hash": "sha256:e70350bcad06e1fabbcce5ef978faa341f5b2bd8f22a97160a5a0c32e5342650",
+      "module": "include"
+    },
+    "include/plexus/graph_builder.h": {
+      "hash": "sha256:84abc32c6dece44a12de34f1464a42bdeca4c149cb83ccd03e6fdfd98bf6d96f",
+      "module": "include"
+    },
+    "include/plexus/executor.h": {
+      "hash": "sha256:2f34f4f3668e940bc460d55417914bab2438a0c7f141d5645d00dcb955e3fcf6",
+      "module": "include"
+    },
+    "include/plexus/detail/function_traits.h": {
+      "hash": "sha256:b365031c9acea9d736c3b15309142c7ab43f1594bb7e4d41319df0059ce22cbc",
+      "module": "include"
+    }
+  },
+  "modules": {
+    "src": {
+      "generated_at": "2026-01-15T07:05:12.544142Z",
+      "source_hashes": [
+        "sha256:8571bef69b8d68d283e6beb99cacd38d41d5727a643380ef8cec0e0e9781698d",
+        "sha256:931b5633a7343ff1a01d47bae5d1d61b6b1a72c7b3e1101c87c45a5d1e8a9017",
+        "sha256:20b4b40603e0b480cbb8fc8aff05f22bdce6921276719a9ade32d35fbb680fe4",
+        "sha256:1fd93660582dc5b6f9c6fe8d2ac3ca185646e1488bcace0cada383bc47e1e4a4",
+        "sha256:e5688e4db4cb02d0931e0fb93671c82be7bd6dbd0f3a8e4908c451b72b511ed9",
+        "sha256:893ca41acefbbbac6392c773f90c2e21de881eac8fed72070ffd7bbc2dc13a89",
+        "sha256:949fc4dd3d99045fc70940504a8f5c0f0b39cc42fa10fc3f9074e11cf7df126e",
+        "sha256:ba623e43af1aaf079d0b89b54ee59319ac27dea52d83f4f32f12b623ddfef932"
+      ]
+    },
+    "include": {
+      "generated_at": "2026-01-15T07:05:12.544142Z",
+      "source_hashes": [
+        "sha256:a32663446abb9a6671263b39c173dbe85dcb8ba8438d2aabc9d53ada1e07fbd6",
+        "sha256:cfa2b3b47ff2af0cdc695f7b2a31536204f9bc3ae67cafe295fc47f06dfd7e09",
+        "sha256:6a39ce120c2b1889165335d53c50877aebbdae84046abbb234f012a78a03e835",
+        "sha256:fc740240c550e2e605955fd5929fab50cfb37bfbb5a6c55d893b23d59cbba138",
+        "sha256:e70350bcad06e1fabbcce5ef978faa341f5b2bd8f22a97160a5a0c32e5342650",
+        "sha256:84abc32c6dece44a12de34f1464a42bdeca4c149cb83ccd03e6fdfd98bf6d96f",
+        "sha256:2f34f4f3668e940bc460d55417914bab2438a0c7f141d5645d00dcb955e3fcf6",
+        "sha256:b365031c9acea9d736c3b15309142c7ab43f1594bb7e4d41319df0059ce22cbc"
+      ]
+    }
+  }
+}
